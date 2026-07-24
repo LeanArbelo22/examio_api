@@ -11,10 +11,11 @@ let app: any;
 let docenteToken: string;
 let alumnoToken: string;
 beforeAll(() => {
-  process.env.JWT_SECRET = 'test-secret-key';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
+  process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   docenteToken = jwt.sign({ id: 1, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
   alumnoToken = jwt.sign({ id: 2, email: 'alumno@test.com', role: 'alumno', idAlumno: 2, idDocente: null }, process.env.JWT_SECRET);
-  app = require('../src/index').app;
+  app = require('../src/app').app;
 });
 
 afterEach(() => {
@@ -66,6 +67,29 @@ describe('POST /api/intentos/iniciar', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
   });
+
+  it('un reintento técnico reutiliza el intento en progreso devuelto por el SP', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ IntentosRealizados: 0, CantidadIntentosMaximos: 3 }] })
+      .mockResolvedValueOnce({ recordset: [{ IntentosRealizados: 1, CantidadIntentosMaximos: 3 }] });
+    (reqBuilder.execute as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'en_progreso' }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'en_progreso' }] });
+
+    const body = { IdPublicacion: 5, IdAlumno: 30500 };
+    const first = await request(app)
+      .post('/api/intentos/iniciar')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .send(body);
+    const retry = await request(app)
+      .post('/api/intentos/iniciar')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .send(body);
+
+    expect(retry.body).toEqual(first.body);
+    expect(reqBuilder.execute).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('POST /api/intentos/guardar-respuesta', () => {
@@ -92,6 +116,31 @@ describe('POST /api/intentos/guardar-respuesta', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
   });
+
+  it('reintentar el mismo texto actualiza la respuesta existente sin insertar otra fila', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ recordset: [{ Id: 9 }] })
+      .mockResolvedValueOnce({});
+
+    const body = { IdIntento: 1, IdPregunta: 10, RtaTexto: 'Respuesta preservada' };
+    const first = await request(app)
+      .post('/api/intentos/guardar-respuesta')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .send(body);
+    const retry = await request(app)
+      .post('/api/intentos/guardar-respuesta')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .send(body);
+
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    const statements = (reqBuilder.query as jest.Mock).mock.calls.map(([statement]) => statement);
+    expect(statements.filter((statement) => String(statement).startsWith('INSERT INTO Respuesta'))).toHaveLength(1);
+    expect(statements.filter((statement) => String(statement).startsWith('UPDATE Respuesta'))).toHaveLength(1);
+  });
 });
 
 describe('POST /api/intentos/:id/finalizar', () => {
@@ -108,6 +157,23 @@ describe('POST /api/intentos/:id/finalizar', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data[0].estado).toBe('entregado');
+  });
+
+  it('un reintento técnico de finalización conserva el mismo estado terminal', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.execute as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'entregado', NotaFinal: 8.00 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'entregado', NotaFinal: 8.00 }] });
+
+    const first = await request(app)
+      .post('/api/intentos/1/finalizar')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+    const retry = await request(app)
+      .post('/api/intentos/1/finalizar')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(retry.body).toEqual(first.body);
+    expect(reqBuilder.execute).toHaveBeenCalledTimes(2);
   });
 });
 

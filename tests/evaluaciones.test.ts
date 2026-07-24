@@ -11,10 +11,11 @@ let app: any;
 let docenteToken: string;
 let alumnoToken: string;
 beforeAll(() => {
-  process.env.JWT_SECRET = 'test-secret-key';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
+  process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   docenteToken = jwt.sign({ id: 1, email: 'lfernandez@test.com', role: 'docente' }, process.env.JWT_SECRET);
   alumnoToken = jwt.sign({ id: 2, email: 'jalumno@test.com', role: 'alumno' }, process.env.JWT_SECRET);
-  app = require('../src/index').app;
+  app = require('../src/app').app;
 });
 
 afterEach(() => {

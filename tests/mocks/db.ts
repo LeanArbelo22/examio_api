@@ -28,6 +28,12 @@ export const createMockPool = () => {
     })),
     Int: 'INT' as unknown as number,
     NVarChar: 'NVARCHAR' as unknown,
+    UniqueIdentifier: 'UNIQUEIDENTIFIER' as unknown,
+    VarBinary: jest.fn().mockReturnValue('VARBINARY' as unknown),
+    DateTime2: 'DATETIME2' as unknown,
+    ISOLATION_LEVEL: {
+      SERIALIZABLE: 'SERIALIZABLE',
+    },
     Bit: 'BIT' as unknown,
     DateTime: 'DATETIME' as unknown,
     Decimal: jest.fn().mockReturnValue('DECIMAL' as unknown),

@@ -86,6 +86,8 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | Tabla | Clave Primaria | Rol |
 |---|---|---|
 | `Usuario` | `Id INT IDENTITY` | Cuentas de acceso al sistema. `Email` unique. `PasswordHash NVARCHAR(255)` (hash de bcrypt). `Rol` (CHECK: `'docente'`, `'alumno'`, `'admin'`). FK opcionales a `Docente(Legajo)` y `Alumno(Matricula)` con CHECK cruzado que asegura que un docente tenga `IdDocente` no nulo y `IdAlumno` nulo, y viceversa. `Activo BIT`. |
+| `AuthSession` | `Id UNIQUEIDENTIFIER` | Familia de credenciales asociada a `Usuario`. Conserva creación, expiración absoluta, última actividad y revocación. No contiene tokens. |
+| `AuthRefreshToken` | `Id UNIQUEIDENTIFIER` | Eslabón de rotación de una sesión. Conserva hash SHA-256, expiraciones, consumo, sucesor, clave de idempotencia y snapshot no sensible de claims. Nunca guarda el refresh o access token completo. |
 
 ---
 
@@ -288,6 +290,78 @@ Cada módulo de negocio expone SPs con el patrón `SP_<Entidad>_<Acción>`:
 
 Todos los SPs de lectura retornan `recordset` con claves en PascalCase. Los SPs de escritura no utilizan `OUTPUT` parameters ni `RETURN` values; los IDs generados se obtienen con `SELECT SCOPE_IDENTITY() AS Id...`.
 
+### 3.9 Sesiones y rotación de refresh tokens
+
+**Migración:** `migrations/20260723_auth_sessions.sql`.
+
+La autenticación persistente usa SQL parametrizado y `sql.Transaction` desde
+`auth.service.ts`; no agrega stored procedures. La migración es idempotente y
+crea tablas, claves foráneas, checks e índices dentro de una transacción con
+`XACT_ABORT ON`.
+
+#### `AuthSession`
+
+| Columna | Tipo | Regla |
+|---|---|---|
+| `Id` | `UNIQUEIDENTIFIER` | PK y familia de tokens; UUID criptográficamente aleatorio. |
+| `IdUsuario` | `INT` | FK a `Usuario(Id)`. |
+| `FechaCreacion` | `DATETIME2(3)` | UTC de creación. |
+| `FechaExpiracion` | `DATETIME2(3)` | Máximo absoluto; inicialmente creación + 12 horas. |
+| `UltimaActividad` | `DATETIME2(3)` | Última rotación exitosa; no extiende expiración. |
+| `FechaRevocacion` | `DATETIME2(3)` | NULL mientras la familia permanece activa. |
+| `MotivoRevocacion` | `NVARCHAR(50)` | `logout`, `refresh_reuse`, `user_inactive` o `institutional_link_invalid`. |
+
+Índice `IX_AuthSession_Usuario_Estado` sobre usuario, revocación y expiración.
+
+#### `AuthRefreshToken`
+
+| Columna | Tipo | Regla |
+|---|---|---|
+| `Id` | `UNIQUEIDENTIFIER` | PK e identificador público aleatorio del token. |
+| `IdSesion` | `UNIQUEIDENTIFIER` | FK a `AuthSession`; todos los eslabones comparten familia. |
+| `TokenHash` | `BINARY(32)` | SHA-256 único del valor opaco completo. |
+| `FechaEmision` | `DATETIME2(3)` | UTC de emisión. |
+| `FechaExpiracion` | `DATETIME2(3)` | Igual al máximo absoluto de `AuthSession`. |
+| `AccessTokenExpiraEn` | `DATETIME2(3)` | Permite reconstruir exactamente una respuesta idempotente. |
+| `FechaConsumo` | `DATETIME2(3)` | Primera rotación exitosa; NULL si continúa vigente. |
+| `ReemplazadoPor` | `UNIQUEIDENTIFIER` | FK autorreferencial al sucesor. |
+| `IdempotencyKey` | `UNIQUEIDENTIFIER` | Clave de la operación que consumió el token. |
+| `ClaimsJson` | `NVARCHAR(1000)` | Snapshot de identidad/rol no sensible usado para reproducir el mismo access token; no contiene tokens, hashes ni contraseña. |
+
+`UQ_AuthRefreshToken_TokenHash` impide hashes duplicados.
+`UX_AuthRefreshToken_Sesion_IdempotencyKey` impide reutilizar una clave dentro de
+la misma sesión. `CHK_AuthRefreshToken_Rotacion` exige que consumo, sucesor y
+clave sean todos NULL o todos no NULL.
+
+#### Construcción y validación
+
+El formato opaco es `ert1.<uuid-v4>.<prueba-hmac-base64url>`. El UUID aporta
+122 bits aleatorios y la prueba usa HMAC-SHA-256 con
+`AUTH_REFRESH_TOKEN_SECRET`, que debe diferir de `JWT_SECRET`. La validación usa
+comparación de tiempo constante y contrasta además el hash almacenado.
+
+La reconstrucción determinística se limita al sucesor ya persistido para repetir
+una rotación con idéntica `Idempotency-Key`; no se almacena ningún secreto
+reutilizable. Conocer la base sin el secreto HMAC no permite construir tokens.
+
+#### Transacciones y concurrencia
+
+Login inserta sesión y primer token en una transacción serializable. Refresh toma
+`UPDLOCK, HOLDLOCK` sobre token y sesión:
+
+1. Si está vigente, inserta sucesor, consume el anterior y actualiza actividad.
+2. Mismo token + misma clave reconstruye exactamente el sucesor.
+3. Otra clave dentro de la gracia devuelve conflicto sin modificar la familia.
+4. Reutilización posterior marca `AuthSession` revocada antes de responder.
+
+Logout toma los mismos bloqueos y marca la familia revocada de forma idempotente.
+Los bloqueos de SQL Server hacen que la política funcione entre procesos e
+instancias diferentes.
+
+No se definió purga automática. La retención y eliminación de sesiones expiradas
+o revocadas debe acordarse antes de agregar un job; conservar temporalmente la
+cadena es necesario para detectar reutilización y auditar motivos sin secretos.
+
 ---
 
 ## 4. Ciclo de Vida de Estados
@@ -399,6 +473,9 @@ ActaMateria 1 ── N DetalleActa
 
 Usuario → Docente (opcional, vía IdDocente)
 Usuario → Alumno (opcional, vía IdAlumno)
+Usuario 1 ── N AuthSession
+AuthSession 1 ── N AuthRefreshToken
+AuthRefreshToken 0..1 ── 1 AuthRefreshToken (sucesor)
 ```
 
 ### 5.2 Restricciones de Integridad
@@ -407,6 +484,10 @@ Usuario → Alumno (opcional, vía IdAlumno)
 - `Respuesta` tiene `UNIQUE(IdIntento, IdPregunta)` — una sola respuesta por pregunta por intento.
 - `DetalleActa` tiene PK `(IdActa, IdAlumno)` — un solo detalle por alumno por acta.
 - `Usuario` tiene CHECK cruzado: si `Rol = 'docente'` entonces `IdDocente IS NOT NULL AND IdAlumno IS NULL`; si `Rol = 'alumno'` entonces `IdAlumno IS NOT NULL AND IdDocente IS NULL`; si `Rol = 'admin'` entonces ambos son NULL.
+- `AuthSession.FechaExpiracion > FechaCreacion`; revocación, si existe, no puede anteceder a la creación.
+- `AuthRefreshToken.TokenHash` es único y tiene longitud fija de 32 bytes.
+- Un refresh consumido debe tener simultáneamente `FechaConsumo`, `ReemplazadoPor` e `IdempotencyKey`.
+- `AccessTokenExpiraEn` debe ser posterior a la emisión y no superar la expiración absoluta del refresh.
 - Las tablas `Carrera`, `Materia`, `Docente` usan `Estado BIT` para baja lógica. `Alumno` usa `Estado NVARCHAR` con tres valores. `Usuario` usa `Activo BIT`.
 - Las notas `NotaCursada` y `NotaFinalExamen` en `DetalleActa` están acotadas al rango `[0.00, 10.00]` por el tipo `DECIMAL(4,2)`. Zod valida además `multipleOf(0.01)` para garantizar exactamente dos decimales.
 

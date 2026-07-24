@@ -41,7 +41,13 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 147 tests de integración con mock completo de `mssql`. Sin dependencia de BD real. |
+| **ts-jest + supertest** | 202 tests de integración con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+
+La construcción de Express está separada del arranque del proceso:
+
+- `src/app.ts` configura middlewares y rutas, y exporta `app` sin ejecutar `listen()`.
+- `src/index.ts` es el único entrypoint que conecta SQL Server y abre `PORT`.
+- Importar `app` desde tests no inicia el servidor ni ocupa el puerto `55803`.
 
 ---
 
@@ -49,13 +55,25 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 
 | Variable | Tipo | Default | Obligatoria | Propósito |
 |---|---|---|---|---|
-| `PORT` | `number` | `3000` | No | Puerto del servidor Express. |
+| `PORT` | `number` | `3000` | No | Puerto exclusivo de la ejecución normal del servidor Express. Los tests no dependen de este puerto. En desarrollo se utiliza `55803`. |
 | `DB_SERVER` | `string` | `localhost` | Sí | Host/IP de SQL Server. |
 | `DB_PORT` | `number` | `1433` | No | Puerto TCP de SQL Server. |
 | `DB_USER` | `string` | `sa` | Sí | Usuario de conexión. |
 | `DB_PASSWORD` | `string` | — | Sí | Contraseña del usuario. |
 | `DB_NAME` | `string` | — | Sí | Base de datos destino (`GestionExamio`). |
-| `JWT_SECRET` | `string` | — | Sí | Clave HMAC para JWT. Si no se define, el servidor lanza `Error` al iniciar. |
+| `JWT_SECRET` | `string` | — | Sí | Clave HMAC (mín. 32 caracteres) para access tokens JWT HS256. |
+| `AUTH_REFRESH_TOKEN_SECRET` | `string` | — | Sí | Secreto HMAC (mín. 32 caracteres) exclusivo para refresh tokens; debe diferir de `JWT_SECRET`. |
+| `AUTH_ACCESS_TOKEN_TTL_SECONDS` | `number` | `900` | No | Vigencia del access token, inicialmente 15 minutos. |
+| `AUTH_SESSION_TTL_SECONDS` | `number` | `43200` | No | Máximo absoluto de sesión, inicialmente 12 horas, sin extensión deslizante. |
+| `AUTH_JWT_ISSUER` | `string` | `examio-api` | No | Issuer requerido en access tokens nuevos. |
+| `AUTH_JWT_AUDIENCE` | `string` | `examio-bff` | No | Audience requerido en access tokens nuevos. |
+| `AUTH_CLOCK_TOLERANCE_SECONDS` | `number` | `30` | No | Tolerancia de reloj en validación JWT. |
+| `AUTH_REFRESH_REUSE_GRACE_SECONDS` | `number` | `10` | No | Ventana para distinguir carreras legítimas de reutilización. |
+| `AUTH_ALLOW_LEGACY_ACCESS_TOKENS` | `boolean` | `true` | No | Compatibilidad transitoria con JWT anteriores sin claims estrictos. |
+| `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `number` | `900` | No | Ventana del limitador local de login. |
+| `AUTH_LOGIN_RATE_LIMIT_MAX` | `number` | `10` | No | Máximo local de intentos por IP+email en la ventana. |
+| `AUTH_REFRESH_RATE_LIMIT_WINDOW_SECONDS` | `number` | `60` | No | Ventana del limitador local de refresh. |
+| `AUTH_REFRESH_RATE_LIMIT_MAX` | `number` | `30` | No | Máximo local por IP+identificador público de token. |
 
 **Ejemplo `.env`:**
 
@@ -67,7 +85,16 @@ DB_USER=Leandro
 DB_PASSWORD=********
 DB_NAME=GestionExamio
 JWT_SECRET=c7a2e8f1d4b9a6c3f0e5d8b7a4c1f9e6d3b0a7c5f2e8d1b4a9c6f3e0d5b8a7
+AUTH_REFRESH_TOKEN_SECRET=otro-secreto-independiente-de-al-menos-32-caracteres
+AUTH_ACCESS_TOKEN_TTL_SECONDS=900
+AUTH_SESSION_TTL_SECONDS=43200
+AUTH_REFRESH_REUSE_GRACE_SECONDS=10
+AUTH_ALLOW_LEGACY_ACCESS_TOKENS=true
 ```
+
+`src/index.ts` valida esta configuración antes de conectar SQL Server y abrir el
+puerto. El TTL de access debe ser menor que el máximo absoluto de sesión y los
+dos secretos no pueden coincidir.
 
 ---
 
@@ -125,6 +152,16 @@ JWT_SECRET=c7a2e8f1d4b9a6c3f0e5d8b7a4c1f9e6d3b0a7c5f2e8d1b4a9c6f3e0d5b8a7
 }
 ```
 
+Los errores procesables incluyen además `code` en el nivel superior:
+
+```json
+{
+  "success": false,
+  "message": "Access token vencido",
+  "code": "ACCESS_TOKEN_EXPIRED"
+}
+```
+
 ### 3.6 Respuesta de Error (validación Zod)
 
 ```json
@@ -171,11 +208,50 @@ Toda respuesta atraviesa `mapKeysToCamelCase()` antes de serializarse. Las clave
 
 Cada endpoint detalla: método, ruta, esquema Zod que valida el body (si aplica), los roles autorizados por `checkRole`, y el payload JSON exacto que debe enviarse en **PascalCase** (tal como lo esperan los stored procedures).
 
+### 4.0 Health check
+
+| Método | Endpoint | Zod | Roles |
+|---|---|---|---|
+| GET | `/api/health` | — | Público |
+
+El endpoint identifica inequívocamente al proceso de la API y ejecuta una consulta liviana `SELECT 1` contra SQL Server con un timeout de 2 segundos.
+
+**API y base disponibles — `200 OK`:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "service": "examio-api",
+    "environment": "development",
+    "database": "reachable"
+  }
+}
+```
+
+**API disponible y base degradada — `503 Service Unavailable`:**
+
+```json
+{
+  "success": false,
+  "data": {
+    "service": "examio-api",
+    "environment": "development",
+    "database": "unreachable"
+  },
+  "message": "Service temporarily unavailable"
+}
+```
+
+`environment` proviene de `NODE_ENV` y usa `development` cuando no está definido. La respuesta no incluye nombres de servidor, base o usuario, credenciales, connection strings ni secretos JWT.
+
 ### 4.1 Auth
 
 | Método | Endpoint | Zod | Roles |
 |---|---|---|---|
 | POST | `/api/auth/login` | `LoginSchema` | Público |
+| POST | `/api/auth/refresh` | `RefreshSchema` | Server-to-server; refresh token + idempotencia |
+| POST | `/api/auth/logout` | `LogoutSchema` | Refresh token; access token opcional |
 
 **Body `POST /api/auth/login`:**
 
@@ -185,6 +261,185 @@ Cada endpoint detalla: método, ruta, esquema Zod que valida el body (si aplica)
   "Password": "Cervantes2026"
 }
 ```
+
+**Respuesta `POST /api/auth/login` — `200`:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<jwt-hs256>",
+    "token": "<mismo-jwt-hs256>",
+    "refreshToken": "<token-opaco>",
+    "accessTokenExpiresAt": "2026-07-23T18:00:00.000Z",
+    "refreshTokenExpiresAt": "2026-07-24T05:45:00.000Z",
+    "user": {
+      "id": 1,
+      "email": "usuario@institucion.edu.ar",
+      "name": "Nombre Apellido",
+      "role": "alumno",
+      "identificadorInstitucional": 30500,
+      "idAlumno": 30500,
+      "idDocente": null
+    }
+  }
+}
+```
+
+`accessToken` es canónico. `token` es un alias deprecado para clientes actuales y
+debe retirarse después de migrar el frontend. El login valida el body antes de
+consultar SQL, no registra credenciales y crea `AuthSession` +
+`AuthRefreshToken` dentro de una transacción.
+
+El access token dura 15 minutos y la sesión tiene un máximo absoluto inicial de
+12 horas. Refresh no extiende dicho máximo. Los timestamps se devuelven siempre
+en UTC ISO 8601; el cliente no debe inferirlos decodificando JWT.
+
+**Body `POST /api/auth/refresh`:**
+
+```http
+Idempotency-Key: 3d20fc1c-c3f5-4f28-a5b1-cd0319ccfe24
+Content-Type: application/json
+```
+
+```json
+{
+  "RefreshToken": "<refresh-token-actual>"
+}
+```
+
+`Idempotency-Key` es obligatorio, debe ser un UUID y representa una operación de
+renovación dentro de una sesión. Respuesta `200`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<nuevo-jwt-hs256>",
+    "refreshToken": "<nuevo-token-opaco>",
+    "accessTokenExpiresAt": "2026-07-23T18:15:00.000Z",
+    "refreshTokenExpiresAt": "2026-07-24T05:45:00.000Z"
+  }
+}
+```
+
+La renovación bloquea la fila en SQL Server, consume el refresh anterior e
+inserta el sucesor en una única transacción serializable. Una repetición con el
+mismo token y la misma clave devuelve exactamente el mismo resultado. Otra clave
+dentro de `AUTH_REFRESH_REUSE_GRACE_SECONDS` recibe `409 REFRESH_CONFLICT` sin
+revocar la sesión. El BFF debe esperar la renovación en curso o volver a leer su
+estado server-side; **no debe ejecutar logout**. Fuera de esa tolerancia, reutilizar
+el token revoca la familia y responde `401 REFRESH_TOKEN_REUSED`.
+
+La ventana de 10 segundos solo tolera carreras legítimas: no prolonga la validez
+general de un token consumido. La coordinación se mantiene entre múltiples
+instancias porque los bloqueos y metadatos residen en SQL Server. El BFF debe
+aplicar single-flight por sesión siempre que sea posible.
+
+**Body `POST /api/auth/logout`:**
+
+```json
+{
+  "RefreshToken": "<refresh-token-actual>"
+}
+```
+
+`Authorization: Bearer <access-token>` es opcional. Si se presenta un access
+token nuevo y válido, debe corresponder a la misma `AuthSession`. El refresh token
+es suficiente aunque el access haya vencido. Logout revoca la familia completa y
+es idempotente:
+
+```json
+{
+  "success": true,
+  "message": "Sesión cerrada correctamente"
+}
+```
+
+Tokens desconocidos, malformados, vencidos o ya revocados producen la misma
+respuesta para no revelar sesiones. No existe logout global en este contrato.
+Los access tokens son stateless y pueden conservar validez criptográfica hasta
+15 minutos después del logout.
+
+#### Claims y validación
+
+Los access tokens nuevos usan exclusivamente HS256 y contienen `sub`, `id`,
+`email`, `role`, `idAlumno`, `idDocente`, `sessionId`, `tokenType: "access"`,
+`iss`, `aud`, `iat` y `exp`. El middleware valida algoritmo, issuer, audience,
+tipo y expiración. Un refresh token es opaco y nunca se acepta como access.
+
+Con `AUTH_ALLOW_LEGACY_ACCESS_TOKENS=true`, JWT antiguos firmados con
+`JWT_SECRET` y sin marcadores modernos continúan aceptándose temporalmente. Si un
+token contiene cualquier marcador moderno (`tokenType`, `sessionId`, `iss` o
+`aud`), se le exige el contrato estricto completo: la compatibilidad no permite
+emitir tokens nuevos incompletos. Desactivar la opción cuando todos los clientes
+usen `accessToken` y no queden sesiones JWT antiguas; después puede retirarse el
+alias `token`.
+
+En cada refresh se recarga usuario, rol y asociación institucional desde SQL. Un
+usuario inactivo o una asociación inválida revoca la sesión. Un cambio válido de
+rol/asociación aparece en el próximo access token; el anterior puede conservar
+claims previos hasta 15 minutos.
+
+#### Códigos de autenticación
+
+| HTTP | Código | Uso del BFF |
+|---|---|---|
+| 400 | `REQUEST_INVALID` | Body o `Idempotency-Key` inválido; no reintentar como refresh automático. |
+| 401 | `INVALID_CREDENTIALS` | Login fallido sin enumerar usuario inexistente/contraseña incorrecta. |
+| 401 | `USER_INACTIVE` | Credenciales correctas pero cuenta inactiva, o desactivada antes del refresh. |
+| 401 | `ACCESS_TOKEN_MISSING` | Falta bearer token. |
+| 401 | `ACCESS_TOKEN_INVALID` | Firma, algoritmo, issuer, audience, tipo o formato inválido. |
+| 401 | `ACCESS_TOKEN_EXPIRED` | El BFF puede ejecutar un único refresh y repetir una vez la solicitud original. |
+| 401 | `REFRESH_TOKEN_INVALID` | Refresh malformado, desconocido o de otro tipo. |
+| 401 | `REFRESH_TOKEN_EXPIRED` | Se alcanzó el máximo absoluto de sesión. |
+| 401 | `REFRESH_TOKEN_REVOKED` | Familia cerrada mediante logout. |
+| 401 | `REFRESH_TOKEN_REUSED` | Replay fuera de tolerancia; la familia fue revocada. |
+| 401 | `SESSION_REVOKED` | Sesión revocada o vinculación institucional inválida. |
+| 403 | `FORBIDDEN` | Usuario autenticado sin rol; nunca intentar refresh. |
+| 409 | `REFRESH_CONFLICT` | Carrera recuperable; esperar/sincronizar, nunca logout. |
+| 429 | `RATE_LIMITED` | Esperar respetando política del BFF. |
+| 503 | `AUTH_INFRASTRUCTURE_ERROR` | Falla temporal, sin detalles internos. |
+| 500 | `AUTH_CONTRACT_ERROR` | Inconsistencia interna inesperada. |
+
+Una sesión inexistente no se diferencia públicamente de un refresh desconocido:
+ambos usan `REFRESH_TOKEN_INVALID` para no crear un oráculo de enumeración.
+
+Login usa un limitador local por IP+email normalizado; refresh usa
+IP+identificador público del token, más un límite agregado por IP. Los límites permiten varias renovaciones
+concurrentes legítimas y nunca almacenan el token completo. Esta defensa es por
+proceso y no basta en despliegues multiinstancia: producción debe agregar rate
+limiting distribuido en gateway, proxy o infraestructura.
+
+Producción requiere HTTPS de extremo a extremo. No deben registrarse
+contraseñas, hashes, access tokens, refresh tokens ni sus headers. Rotar
+`JWT_SECRET` invalida access tokens existentes, pero una sesión activa puede
+recuperarse mediante refresh. Rotar `AUTH_REFRESH_TOKEN_SECRET` invalida todos
+los refresh tokens y equivale operativamente a cerrar todas las sesiones; debe
+planificarse como una rotación coordinada. No existe todavía un keyring de
+secretos anteriores.
+
+#### Contrato para NextAuth/BFF
+
+- Los callbacks server-side conservan `accessToken`, `refreshToken` y ambos
+  vencimientos en el JWT HttpOnly de NextAuth.
+- Nunca exponer esos cuatro campos, `sessionId` ni `token` mediante
+  `session.user`.
+- Ante `ACCESS_TOKEN_EXPIRED`, ejecutar single-flight, llamar `/refresh` con un
+  UUID por operación, persistir ambos tokens rotados y repetir la solicitud
+  original como máximo una vez.
+- Ante `REFRESH_CONFLICT`, esperar/consultar la sesión server-side; no borrar la
+  sesión y no iniciar otra cadena de refresh con el token consumido.
+- No intentar refresh ante `FORBIDDEN`, `REQUEST_INVALID` o errores funcionales
+  académicos.
+- Reenviar el body original sin transformarlo y solamente desde Route Handlers
+  server-side.
+
+Refresh, logout fallido y errores de autenticación no modifican intentos,
+publicaciones, respuestas ni temporizadores. Renovar no pausa ni amplía un
+examen. El reloj autoritativo es backend/SQL Server. Inicio y finalización ya son
+idempotentes; guardar la misma opción o el mismo texto no duplica la respuesta.
+Telemetría puede duplicarse ante reintentos y permanece como decisión separada.
 
 ### 4.2 Alumnos
 
@@ -910,6 +1165,126 @@ Cada endpoint detalla: método, ruta, esquema Zod que valida el body (si aplica)
 
 ---
 
+### 4.14 Reportes — Rendimiento por Alumno
+
+| Método | Endpoint | Zod | Roles |
+|---|---|---|---|
+| GET | `/api/reportes/rendimiento` | — | `admin`, `docente` |
+
+**Descripción:**
+Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta dos modos:
+
+- **Modo detalle** (con `matricula`): KPIs del alumno + desglose por actividad con todos los intentos.
+- **Modo listado** (sin `matricula`): Todos los alumnos dentro del alcance del docente/administrador con KPIs por alumno y paginación.
+
+**Query Params (todos opcionales):**
+
+| Parámetro | Tipo | Default | Propósito |
+|---|---|---|---|
+| `matricula` | `number` | — | Filtrar por un alumno específico |
+| `idMateria` | `number` | — | Filtrar por materia |
+| `idMateriaDivision` | `number` | — | Filtrar por comisión |
+| `idActividad` | `number` | — | Filtrar por evaluación (solo modo detalle) |
+| `estado` | `enum` | — | `entregado` \| `en_progreso` \| `vencido` |
+| `fechaDesde` | `string` (ISO 8601) | — | Filtro por fecha de inicio del intento |
+| `fechaHasta` | `string` (ISO 8601) | — | Filtro por fecha de inicio del intento |
+| `promedioMin` | `number` (0–10) | — | Promedio mínimo (modo listado) |
+| `promedioMax` | `number` (0–10) | — | Promedio máximo (modo listado) |
+| `ordenarPor` | `enum` | `alumno` | `alumno` \| `promedio` \| `aprobados` \| `intentos` |
+| `ordenDireccion` | `enum` | `asc` | `asc` \| `desc` |
+| `pagina` | `number` | `1` | Número de página (modo listado) |
+| `limite` | `number` | `20` | Resultados por página, máx. 100 |
+
+**Reglas de negocio:**
+- Roles: `docente` o `admin`. El `alumno` recibe 403.
+- El `idDocente` se obtiene exclusivamente del JWT (`req.user.idDocente`). No se recibe por URL/query.
+- Cuando el usuario es `docente`, solo ve alumnos pertenecientes a sus `MateriaDivision`.
+- Cuando el usuario es `admin`, no hay restricción de docente.
+- `fechaDesde` ≤ `fechaHasta` — si se invierten, 400 Bad Request.
+- `promedioMin` ≤ `promedioMax` — 400 si se invierten.
+- `limite` entre 1 y 100.
+- Sin `matricula`: devuelve listado paginado con KPIs globales y por alumno.
+- Con `matricula`: devuelve detalle completo con KPIs del alumno y actividades agrupadas.
+
+**Response — modo detalle (`?matricula=30500`):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "alumno": {
+      "matricula": 30500,
+      "nombre": "Julieta",
+      "apellido": "Acosta"
+    },
+    "kpis": {
+      "totalIntentos": 5,
+      "totalCorregidos": 4,
+      "promedioGeneral": 7.25,
+      "aprobados": 3,
+      "desaprobados": 1,
+      "porcentajeAprobacion": 75.0
+    },
+    "actividades": [
+      {
+        "idActividad": 1,
+        "titulo": "Parcial I",
+        "tipo": "evaluacion",
+        "materia": "Matemática",
+        "division": "A",
+        "intentos": 2,
+        "notaMaxima": 8.5,
+        "notaPromedio": 8.0,
+        "mejorIntento": {
+          "numeroIntento": 2,
+          "notaFinal": 8.5,
+          "notaAutomatica": null,
+          "fechaFin": "2026-06-20T11:00:00.000Z"
+        }
+      }
+    ]
+  }
+}
+```
+
+**Response — modo listado (sin `matricula`):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "paginacion": {
+      "pagina": 1,
+      "limite": 20,
+      "total": 45,
+      "totalPaginas": 3
+    },
+    "kpis": {
+      "totalAlumnos": 45,
+      "conIntentos": 40,
+      "totalIntentos": 180,
+      "promedioGeneral": 6.8,
+      "tasaAprobacion": 72.5
+    },
+    "alumnos": [
+      {
+        "matricula": 30500,
+        "nombre": "Julieta",
+        "apellido": "Acosta",
+        "totalIntentos": 5,
+        "totalCorregidos": 4,
+        "promedio": 7.25,
+        "aprobados": 3,
+        "desaprobados": 1,
+        "porcentajeAprobacion": 75.0
+      }
+    ]
+  }
+}
+```
+
+---
+
 ## 5. Esquemas Zod — Detalle Completo
 
 ### 5.1 Tipos de Dato y Obligatoriedad
@@ -1043,8 +1418,8 @@ Cada endpoint detalla: método, ruta, esquema Zod que valida el body (si aplica)
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (147 tests)
-npx jest --verbose  # Reporte detallado (147 tests)
+npm test            # Suite completa (202 tests)
+npx jest --verbose  # Reporte detallado (202 tests)
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
 ```
@@ -1055,14 +1430,18 @@ npx jest -t "carreras"       # Por patrón de nombre
 tests/
 ├── mocks/
 │   └── db.ts               ← Fábrica de mock de mssql
-├── admin.test.ts           ← Dashboard analítico + KPIs + filtros + RBAC (5)
-├── auth.test.ts            ← Login, bcrypt, JWT (4)
-├── alumnos.test.ts         ← CRUD Alumnos + camelCase + estadísticas (13)
-├── evaluaciones.test.ts    ← Evaluaciones + modificar-completo + preguntas + detalle + alumnos (21)
-├── intentos.test.ts        ← Intentos + getIntentoCompleto + calificar + corregir + detallados + historial (28)
-├── academico.test.ts       ← Carreras, Materias, Docentes (41)
-├── actas.test.ts           ← Actas, Detalle, decimales (15)
-└── rbac.test.ts            ← checkRole, JWT, roles (20)
+├── admin.test.ts           ← Dashboard analítico + KPIs + filtros + RBAC
+├── auth.test.ts            ← Login, contrato compatible y seguridad de credenciales
+├── auth-refresh.test.ts    ← Rotación, concurrencia, reutilización y logout
+├── auth-config.test.ts     ← Validación de secretos y duraciones
+├── alumnos.test.ts         ← CRUD Alumnos + camelCase + estadísticas
+├── evaluaciones.test.ts    ← Evaluaciones + modificar-completo + preguntas + detalle + alumnos
+├── intentos.test.ts        ← Intentos, respuestas, reintentos, corrección e historial
+├── academico.test.ts       ← Carreras, Materias, Docentes
+├── actas.test.ts           ← Actas, Detalle, decimales
+├── health.test.ts          ← Identidad de API, disponibilidad SQL y contrato degradado
+├── rbac.test.ts            ← checkRole, JWT estricto/legacy, tipos y roles
+└── reportes.test.ts        ← Rendimiento por alumno + listado + filtros + paginación
 ```
 
 ### 6.3 Aislamiento
@@ -1099,26 +1478,27 @@ adminToken = jwt.sign(
 | `npm run build` | Compilación TypeScript → `/dist`. |
 | `npm test` | Suite de tests con Jest. |
 
+> **Limitación conocida de build:** actualmente `npm run build` falla por la
+> configuración TypeScript preexistente. El proyecto combina `module: "nodenext"`
+> y un paquete CommonJS con `verbatimModuleSyntax: true`; además, `rootDir` no
+> está acompañado por un `include` que excluya tests y scripts, y falta el tipado
+> declarado de `mssql`. Esta deuda no afecta `npm run dev` ni la suite Jest, pero
+> requiere una normalización específica de la estrategia CommonJS/ESM y del
+> alcance de compilación antes de considerar operativo el build de producción.
+
 ---
 
 ## 8. Errores Conocidos y Deuda Técnica
 
-### 8.1 Auth — Login sin validación Zod
+### 8.1 Auth — transición y límites distribuidos
 
-**Archivo:** `src/routes/auth.routes.ts:6`
+El login ya aplica Zod, elimina logs sensibles y emite access + refresh tokens
+rotatorios. Permanecen dos tareas operativas:
 
-El endpoint `POST /api/auth/login` está documentado con `LoginSchema` pero la ruta no incluye el middleware `validateRequest(LoginSchema)`. Actualmente el controlador recibe `req.body` sin prevalidación.
-
-**Impacto:** Endpoint público acepta payloads mal formados sin rechazarlos en la capa HTTP.
-
-**Fix pendiente:**
-```typescript
-// src/routes/auth.routes.ts
-import { validateRequest } from '../middlewares/auth.middleware';
-import { LoginSchema } from '../schemas/academico.schema';
-
-router.post('/login', validateRequest(LoginSchema), login);
-```
+- Desactivar `AUTH_ALLOW_LEGACY_ACCESS_TOKENS` y retirar el alias `token` después
+  de migrar todos los clientes.
+- Configurar rate limiting distribuido en producción. El limitador incluido es
+  deliberadamente local por proceso y solo constituye defensa básica.
 
 ---
 

@@ -21,8 +21,3 @@ export const CarreraSchema = z.object({
   Descripcion: z.string().max(500).optional(),
   DuracionSemestres: z.number().int().optional(),
 });
-
-export const LoginSchema = z.object({
-  Email: z.string().email().max(150),
-  Password: z.string().min(1),
-});

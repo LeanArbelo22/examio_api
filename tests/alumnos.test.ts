@@ -10,9 +10,10 @@ jest.mock('mssql', () => mock.pool);
 let app: any;
 let adminToken: string;
 beforeAll(() => {
-  process.env.JWT_SECRET = 'test-secret-key';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
+  process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   adminToken = jwt.sign({ id: 1, email: 'admin@test.com', role: 'admin' }, process.env.JWT_SECRET);
-  app = require('../src/index').app;
+  app = require('../src/app').app;
 });
 
 afterEach(() => {

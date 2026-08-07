@@ -6,10 +6,11 @@ import {
   updateAlumno,
   deleteAlumno,
   getMateriasByAlumno,
-  getEstadisticasAlumno
+  getEstadisticasAlumno,
+  inscribirAlumno
 } from '../controllers/alumnos.controller';
 import { checkRole, validateRequest } from '../middlewares/auth.middleware';
-import { AlumnoSchema } from '../schemas/academico.schema';
+import { AlumnoSchema, InscripcionAlumnoSchema } from '../schemas/academico.schema';
 
 const router = Router();
 
@@ -18,6 +19,12 @@ router.get('/:matricula', checkRole(['admin', 'docente', 'alumno']), getAlumnoBy
 router.post('/', checkRole(['admin']), validateRequest(AlumnoSchema), createAlumno);
 router.put('/:matricula', checkRole(['admin']), validateRequest(AlumnoSchema.partial()), updateAlumno);
 router.delete('/:matricula', checkRole(['admin']), deleteAlumno);
+router.post(
+  '/:matricula/inscripciones',
+  checkRole(['admin']),
+  validateRequest(InscripcionAlumnoSchema),
+  inscribirAlumno
+);
 router.get('/:matricula/materias', checkRole(['admin', 'docente', 'alumno']), getMateriasByAlumno);
 router.get('/:matricula/estadisticas', checkRole(['admin', 'docente', 'alumno']), getEstadisticasAlumno);
 

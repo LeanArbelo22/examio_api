@@ -2,6 +2,55 @@ import { Request, Response } from 'express';
 import { pool } from '../config/db';
 import * as sql from 'mssql';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
+import { RendimientoEvaluacionesQuerySchema } from '../schemas/reportes.schema';
+import {
+  getRendimientoEvaluacionesReport,
+  isEvaluationReportScopeAllowed,
+} from '../services/reportes-evaluaciones.service';
+
+export const getRendimientoEvaluaciones = async (req: Request, res: Response) => {
+  const parsed = RendimientoEvaluacionesQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      message: 'Filtros inválidos',
+      code: 'REQUEST_INVALID',
+      errors: parsed.error.issues,
+    });
+  }
+
+  try {
+    const user = (req as any).user;
+    const idDocente = user.role === 'docente' ? Number(user.idDocente) : null;
+    if (user.role === 'docente' && (!Number.isInteger(idDocente) || idDocente <= 0)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tiene alcance docente válido',
+        code: 'REPORT_SCOPE_FORBIDDEN',
+      });
+    }
+
+    if (idDocente !== null) {
+      const allowed = await isEvaluationReportScopeAllowed(idDocente, parsed.data);
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Los filtros solicitados están fuera de su alcance',
+          code: 'REPORT_SCOPE_FORBIDDEN',
+        });
+      }
+    }
+
+    const data = await getRendimientoEvaluacionesReport(parsed.data, idDocente);
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: 'No se pudo obtener el rendimiento por evaluación',
+      code: 'INTERNAL_ERROR',
+    });
+  }
+};
 
 export const getRendimiento = async (req: Request, res: Response) => {
   try {

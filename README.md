@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 202 tests de integración con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 260 tests de integración con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -448,6 +448,7 @@ Telemetría puede duplicarse ante reintentos y permanece como decisión separada
 | GET | `/api/alumnos` | — | `admin`, `docente` |
 | GET | `/api/alumnos/:matricula` | — | `admin`, `docente`, `alumno` |
 | POST | `/api/alumnos` | `AlumnoSchema` | `admin` |
+| POST | `/api/alumnos/:matricula/inscripciones` | `InscripcionAlumnoSchema` | `admin` |
 | PUT | `/api/alumnos/:matricula` | `AlumnoSchema.partial()` | `admin` |
 | DELETE | `/api/alumnos/:matricula` | — | `admin` |
 | GET | `/api/alumnos/:matricula/materias` | — | `admin`, `docente`, `alumno` |
@@ -464,6 +465,74 @@ Telemetría puede duplicarse ante reintentos y permanece como decisión separada
   "Correo": "jacosta@cervantes.edu.ar"
 }
 ```
+
+#### Inscribir un alumno en una comisión
+
+`POST /api/alumnos/:matricula/inscripciones` crea la relación entre el alumno y
+una `MateriaDivision`. Requiere un access token con rol `admin`.
+
+- `matricula`: entero positivo en el path.
+- El body conserva el casing PascalCase habitual de escritura:
+
+```json
+{
+  "IdMateriaDivision": 15
+}
+```
+
+Una inscripción nueva devuelve `201 Created`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "matricula": 30999,
+    "idMateriaDivision": 15
+  },
+  "message": "Alumno inscripto correctamente"
+}
+```
+
+La operación es idempotente por la clave lógica
+`(IdMateriaDivision, IdAlumno)`. Si la relación ya existe, devuelve `200 OK` con
+el mismo recurso y no vuelve a insertar:
+
+```json
+{
+  "success": true,
+  "data": {
+    "matricula": 30999,
+    "idMateriaDivision": 15
+  },
+  "message": "El alumno ya estaba inscripto"
+}
+```
+
+La API valida alumno activo, existencia de `MateriaDivision`, integridad de sus
+relaciones con materia/división y materia activa. SQL Server serializa por la
+relación mediante una transacción `SERIALIZABLE` y bloqueos
+`UPDLOCK/HOLDLOCK`; la PK compuesta es la defensa final frente a duplicados. La
+garantía funciona entre procesos o instancias que comparten la misma base.
+
+| HTTP | `code` | Significado |
+|---:|---|---|
+| 400 | `REQUEST_INVALID` | Matrícula o body inválidos |
+| 401 | `ACCESS_TOKEN_MISSING` | Falta el access token |
+| 401 | `ACCESS_TOKEN_INVALID` | Access token inválido |
+| 401 | `ACCESS_TOKEN_EXPIRED` | Access token vencido |
+| 403 | `FORBIDDEN` | El usuario autenticado no es `admin` |
+| 404 | `STUDENT_NOT_FOUND` | No existe la matrícula |
+| 404 | `MATERIA_DIVISION_NOT_FOUND` | No existe la comisión o sus relaciones no son válidas |
+| 409 | `STUDENT_INACTIVE` | El alumno está inactivo o suspendido |
+| 409 | `MATERIA_INACTIVE` | La materia asociada está dada de baja |
+| 500 | `INTERNAL_ERROR` | Fallo interno sin detalles SQL |
+
+La inscripción pasa a ser visible mediante
+`GET /api/alumnos/:matricula/materias`, los listados de alumnos por comisión y
+las evaluaciones pendientes publicadas para esa `MateriaDivision`. No crea ni
+modifica publicaciones, intentos, respuestas, notas o actas existentes. El
+modelo actual no define cupos, períodos/cierre de inscripción, correlatividades
+ni inscripción masiva; esas reglas no se infieren en este endpoint.
 
 **Body `PUT /api/alumnos/:matricula`** (parcial, todos los campos son opcionales):
 
@@ -1163,9 +1232,173 @@ Telemetría puede duplicarse ante reintentos y permanece como decisión separada
 }
 ```
 
+### 4.14 Reportes — Rendimiento por Evaluación
+
+| Método | Endpoint | Validación | Roles |
+|---|---|---|---|
+| GET | `/api/reportes/rendimiento-evaluaciones` | `RendimientoEvaluacionesQuerySchema` | `admin`, `docente` |
+
+La unidad de cada fila es una `Publicacion` cuya actividad tiene
+`Tipo = 'evaluacion'`. KPIs y gráficos se calculan sobre todo el alcance después
+de RBAC y filtros; `evaluaciones` contiene únicamente la página solicitada.
+
+#### Filtros
+
+Todos son opcionales y se combinan con semántica AND. El schema es estricto:
+parámetros desconocidos también producen `400 REQUEST_INVALID`.
+
+| Parámetro | Tipo/default | Regla |
+|---|---|---|
+| `idMateria` | entero positivo | Materia de la comisión |
+| `idMateriaDivision` | entero positivo | Comisión exacta |
+| `idActividad` | entero positivo | Actividad base |
+| `idPublicacion` | entero positivo | Publicación exacta |
+| `estado` | enum | `borrador`, `publicada` o `archivada`; corresponde a `Actividad.Estado` |
+| `fechaDesde` | ISO 8601 | `Publicacion.FechaInicio >= fechaDesde` |
+| `fechaHasta` | ISO 8601 | `Publicacion.FechaInicio <= fechaHasta` |
+| `pagina` | entero, default `1` | Mínimo 1 |
+| `limite` | entero, default `20` | Entre 1 y 100 |
+| `ordenarPor` | enum, default `fecha` | `evaluacion`, `fecha`, `promedio`, `entregados`, `aprobacion`, `pendientesCorreccion` |
+| `ordenDireccion` | enum, default `desc` | `asc` o `desc` |
+
+Todo orden agrega `idPublicacion ASC` como desempate estable. Las fechas pueden
+ser `YYYY-MM-DD` o timestamps ISO 8601; `fechaDesde` no puede superar
+`fechaHasta`.
+
+#### RBAC y alcance
+
+- `admin` consulta todas las publicaciones institucionales alcanzadas por los filtros.
+- `docente` usa exclusivamente `idDocente` del access token y sólo consulta
+  `MateriaDivision.IdDocente = idDocente`.
+- No se acepta identidad docente desde query string.
+- Si un docente especifica materia, comisión, actividad o publicación que no
+  coincide con una publicación de evaluación de su alcance, recibe
+  `403 REPORT_SCOPE_FORBIDDEN`. La respuesta no distingue recurso inexistente de
+  recurso ajeno.
+- `alumno` recibe `403 FORBIDDEN`.
+
+#### Reglas de cálculo
+
+- **Evaluación:** una publicación de una actividad con `Tipo = 'evaluacion'`.
+- **Alumno alcanzado:** alumno actualmente presente en `InscripcionMateria` para
+  la `MateriaDivision` publicada. La tabla no conserva fecha de inscripción, por
+  lo que no representa un padrón histórico al momento de publicación.
+- **Alumno único:** matrícula distinta dentro de todas las publicaciones
+  filtradas; si aparece en varias publicaciones se cuenta una vez.
+- **Alumno que inició:** matrícula distinta con al menos un intento en esa publicación.
+- **Sin iniciar:** `max(alumnosAlcanzados - alumnosQueIniciaron, 0)`.
+- **Entregado:** intento cuyo estado es exactamente `entregado`.
+- **Pendiente de corrección:** intento `entregado` con `NotaFinal IS NULL`. Es el
+  estado efectivo dejado por finalización cuando existen preguntas abiertas y
+  continúa así hasta la asignación de nota final.
+- **Calificado:** intento `entregado` con `NotaFinal IS NOT NULL`.
+- **Promedio:** promedio ponderado por intento calificado, no promedio de
+  promedios por publicación. Sin intentos calificados devuelve `null`.
+- **Aprobado/desaprobado:** intento calificado con `NotaFinal >= 6` o `< 6`.
+  El umbral 6 reutiliza el reporte de rendimiento vigente; no define una nueva
+  regla académica. Existe deuda conocida porque otros cálculos legacy usan 4.
+- **Tasa de aprobación:** intentos aprobados / intentos calificados × 100. Sin
+  denominador devuelve `null`.
+- `en_progreso`, `vencido` y `anulado` se cuentan separadamente. No participan
+  en calificados, promedio ni tasa.
+
+No existe una regla canónica que elija mejor, último o primer intento como nota
+académica definitiva. Por eso este contrato no consolida intentos múltiples:
+usa nombres explícitos por intento y expone por separado alumnos distintos que
+iniciaron. Cambiar esta interpretación requiere una decisión funcional futura.
+
+`graficos.distribucionResultados` usa categorías mutuamente excluyentes por
+intento: `Aprobados`, `Desaprobados`, `Pendientes de corrección`, `En progreso`,
+`Vencidos` y `Anulados`. Las dos primeras y la pendiente sólo clasifican
+intentos `entregado`; las restantes corresponden directamente al estado.
+
+#### Response
+
+```json
+{
+  "success": true,
+  "data": {
+    "kpis": {
+      "totalEvaluaciones": 12,
+      "totalAlumnosAlcanzados": 280,
+      "totalAlumnosUnicos": 145,
+      "totalIntentos": 260,
+      "totalEntregados": 230,
+      "totalEnProgreso": 15,
+      "totalVencidos": 5,
+      "totalAnulados": 10,
+      "totalIntentosCalificados": 210,
+      "intentosPendientesCorreccion": 20,
+      "promedioIntentosCalificados": 7.15,
+      "tasaAprobacionIntentos": 74.3
+    },
+    "graficos": {
+      "distribucionResultados": [
+        { "categoria": "Aprobados", "cantidad": 156 },
+        { "categoria": "Desaprobados", "cantidad": 54 },
+        { "categoria": "Pendientes de corrección", "cantidad": 20 },
+        { "categoria": "En progreso", "cantidad": 15 },
+        { "categoria": "Vencidos", "cantidad": 5 },
+        { "categoria": "Anulados", "cantidad": 10 }
+      ]
+    },
+    "evaluaciones": [
+      {
+        "idPublicacion": 47,
+        "idActividad": 18,
+        "titulo": "Parcial SQL",
+        "idMateria": 5,
+        "materia": "Bases de Datos",
+        "idMateriaDivision": 12,
+        "division": "2A",
+        "fechaInicio": "2026-08-01T12:00:00.000Z",
+        "fechaFin": "2026-08-01T14:00:00.000Z",
+        "estado": "publicada",
+        "alumnosAlcanzados": 30,
+        "alumnosQueIniciaron": 28,
+        "sinIniciar": 2,
+        "intentosTotales": 30,
+        "entregados": 27,
+        "enProgreso": 1,
+        "vencidos": 1,
+        "anulados": 1,
+        "intentosCalificados": 24,
+        "intentosPendientesCorreccion": 3,
+        "promedioIntentosCalificados": 7.15,
+        "intentosAprobados": 18,
+        "intentosDesaprobados": 6,
+        "porcentajeAprobacionIntentos": 75.0
+      }
+    ],
+    "paginacion": {
+      "pagina": 1,
+      "limite": 20,
+      "total": 12,
+      "totalPaginas": 1
+    }
+  }
+}
+```
+
+Un listado vacío devuelve `200`, `evaluaciones: []`, `total: 0`,
+`totalPaginas: 0`, `distribucionResultados: []`; promedio y tasa son `null`.
+
+#### Errores
+
+| HTTP | `code` | Motivo |
+|---:|---|---|
+| 400 | `REQUEST_INVALID` | Filtro, fecha, paginación u ordenamiento inválidos |
+| 401 | `ACCESS_TOKEN_MISSING` / `ACCESS_TOKEN_INVALID` / `ACCESS_TOKEN_EXPIRED` | Autenticación |
+| 403 | `FORBIDDEN` | Rol no autorizado |
+| 403 | `REPORT_SCOPE_FORBIDDEN` | Identidad docente inválida o filtro explícito fuera de alcance |
+| 500 | `INTERNAL_ERROR` | Error interno sin SQL ni stack |
+
+El endpoint existente `GET /api/reportes/rendimiento` conserva íntegramente su
+contrato.
+
 ---
 
-### 4.14 Reportes — Rendimiento por Alumno
+### 4.15 Reportes — Rendimiento por Alumno
 
 | Método | Endpoint | Zod | Roles |
 |---|---|---|---|
@@ -1418,8 +1651,8 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (202 tests)
-npx jest --verbose  # Reporte detallado (202 tests)
+npm test            # Suite completa (260 tests)
+npx jest --verbose  # Reporte detallado (260 tests)
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
 ```
@@ -1434,14 +1667,14 @@ tests/
 ├── auth.test.ts            ← Login, contrato compatible y seguridad de credenciales
 ├── auth-refresh.test.ts    ← Rotación, concurrencia, reutilización y logout
 ├── auth-config.test.ts     ← Validación de secretos y duraciones
-├── alumnos.test.ts         ← CRUD Alumnos + camelCase + estadísticas
+├── alumnos.test.ts         ← CRUD, inscripción idempotente, camelCase + estadísticas
 ├── evaluaciones.test.ts    ← Evaluaciones + modificar-completo + preguntas + detalle + alumnos
 ├── intentos.test.ts        ← Intentos, respuestas, reintentos, corrección e historial
 ├── academico.test.ts       ← Carreras, Materias, Docentes
 ├── actas.test.ts           ← Actas, Detalle, decimales
 ├── health.test.ts          ← Identidad de API, disponibilidad SQL y contrato degradado
 ├── rbac.test.ts            ← checkRole, JWT estricto/legacy, tipos y roles
-└── reportes.test.ts        ← Rendimiento por alumno + listado + filtros + paginación
+└── reportes.test.ts        ← Rendimiento por alumno/evaluación + filtros + paginación global
 ```
 
 ### 6.3 Aislamiento

@@ -9,10 +9,12 @@ jest.mock('mssql', () => mock.pool);
 
 let app: any;
 let adminToken: string;
+let docenteToken: string;
 beforeAll(() => {
   process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
   process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   adminToken = jwt.sign({ id: 1, email: 'admin@test.com', role: 'admin' }, process.env.JWT_SECRET);
+  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
   app = require('../src/app').app;
 });
 
@@ -191,6 +193,257 @@ describe('GET /api/alumnos/:matricula/materias', () => {
       materia: 'Bases de Datos I',
       division: '1NMS',
     });
+  });
+});
+
+describe('POST /api/alumnos/:matricula/inscripciones', () => {
+  const activeStudent = { recordset: [{ Estado: 'activo' }] };
+  const activeCommission = { recordset: [{ Id: 15, MateriaActiva: true }] };
+  const noEnrollment = { recordset: [] };
+  const existingEnrollment = { recordset: [{ IdAlumno: 30999, IdMateriaDivision: 15 }] };
+
+  beforeEach(() => {
+    (mock.transactionRequest.query as jest.Mock).mockReset();
+    (mock.transactionRequest.execute as jest.Mock).mockReset().mockResolvedValue({ recordset: [] });
+  });
+
+  const prepareQueries = (
+    student = activeStudent,
+    commission = activeCommission,
+    enrollment = noEnrollment
+  ) => {
+    (mock.transactionRequest.query as jest.Mock)
+      .mockResolvedValueOnce(student)
+      .mockResolvedValueOnce(commission)
+      .mockResolvedValueOnce(enrollment);
+  };
+
+  it('crea la inscripción con una transacción serializable y la relación correcta', async () => {
+    prepareQueries();
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({
+      success: true,
+      data: { matricula: 30999, idMateriaDivision: 15 },
+      message: 'Alumno inscripto correctamente',
+    });
+    expect(mock.pool.Transaction).toHaveBeenCalledWith(mock.pool);
+    const transaction = (mock.pool.Transaction as jest.Mock).mock.results.at(-1)?.value;
+    expect(transaction.begin).toHaveBeenCalledWith(mock.pool.ISOLATION_LEVEL.SERIALIZABLE);
+    expect(transaction.commit).toHaveBeenCalledTimes(1);
+    expect(transaction.rollback).not.toHaveBeenCalled();
+    expect(mock.transactionRequest.execute).toHaveBeenCalledWith('SP_Alumno_InscribirMateria');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Matricula', mock.pool.Int, 30999);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('IdMateriaDivision', mock.pool.Int, 15);
+    const sqlQueries = (mock.transactionRequest.query as jest.Mock).mock.calls
+      .map(([query]) => query)
+      .join('\n');
+    expect(sqlQueries).toContain('UPDLOCK, HOLDLOCK');
+    expect(sqlQueries).not.toMatch(/\b(Intento|Respuesta|Publicacion)\b/);
+  });
+
+  it('se refleja en la consulta existente de materias del alumno', async () => {
+    prepareQueries();
+    const getRequest = mock.pool.request();
+    (getRequest.execute as jest.Mock)
+      .mockResolvedValueOnce({
+        recordset: [{ NombreAlumno: 'Alumno Demo', Materia: 'Programación', Division: '1A' }],
+      });
+
+    const createRes = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+    const getRes = await request(app)
+      .get('/api/alumnos/30999/materias')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(createRes.status).toBe(201);
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.data).toEqual([
+      { nombreAlumno: 'Alumno Demo', materia: 'Programación', division: '1A' },
+    ]);
+  });
+
+  it('devuelve 200 y no inserta cuando la inscripción ya existe', async () => {
+    prepareQueries(activeStudent, activeCommission, existingEnrollment);
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ matricula: 30999, idMateriaDivision: 15 });
+    expect(res.body.message).toBe('El alumno ya estaba inscripto');
+    expect(mock.transactionRequest.execute).not.toHaveBeenCalled();
+  });
+
+  it('mantiene una sola inserción ante dos solicitudes concurrentes equivalentes', async () => {
+    let enrollmentChecks = 0;
+    (mock.transactionRequest.query as jest.Mock).mockImplementation((query: string) => {
+      if (query.includes('FROM Alumno')) return Promise.resolve(activeStudent);
+      if (query.includes('FROM MateriaDivision')) return Promise.resolve(activeCommission);
+      if (query.includes('FROM InscripcionMateria')) {
+        enrollmentChecks += 1;
+        return Promise.resolve(enrollmentChecks === 1 ? noEnrollment : existingEnrollment);
+      }
+      return Promise.resolve({ recordset: [] });
+    });
+
+    const sendEnrollment = () => request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    const responses = await Promise.all([sendEnrollment(), sendEnrollment()]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 201]);
+    expect(mock.transactionRequest.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('devuelve 404 cuando el alumno no existe', async () => {
+    prepareQueries({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/alumnos/99999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('STUDENT_NOT_FOUND');
+  });
+
+  it.each(['inactivo', 'suspendido'])('rechaza un alumno con estado %s', async (estado) => {
+    prepareQueries({ recordset: [{ Estado: estado }] });
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('STUDENT_INACTIVE');
+  });
+
+  it('devuelve 404 cuando MateriaDivision no existe o sus relaciones no son válidas', async () => {
+    prepareQueries(activeStudent, { recordset: [] });
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 99999 });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('MATERIA_DIVISION_NOT_FOUND');
+  });
+
+  it('rechaza una comisión asociada a una materia inactiva', async () => {
+    prepareQueries(activeStudent, { recordset: [{ Id: 15, MateriaActiva: false }] });
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('MATERIA_INACTIVE');
+  });
+
+  it.each([
+    [{ IdMateriaDivision: 0 }],
+    [{ IdMateriaDivision: -1 }],
+    [{ IdMateriaDivision: 1.5 }],
+    [{ IdMateriaDivision: '15' }],
+    [{}],
+  ])('rechaza body inválido: %p', async (body) => {
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REQUEST_INVALID');
+  });
+
+  it.each(['abc', '0', '-1', '1.5'])('rechaza matrícula inválida: %s', async (matricula) => {
+    const res = await request(app)
+      .post(`/api/alumnos/${matricula}/inscripciones`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REQUEST_INVALID');
+  });
+
+  it('rechaza una solicitud sin token', async () => {
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('ACCESS_TOKEN_MISSING');
+  });
+
+  it('rechaza un token inválido', async () => {
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', 'Bearer token-invalido')
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('ACCESS_TOKEN_INVALID');
+  });
+
+  it('rechaza un access token vencido', async () => {
+    const expiredToken = jwt.sign(
+      { id: 1, email: 'admin@test.com', role: 'admin' },
+      process.env.JWT_SECRET!,
+      { expiresIn: -60 }
+    );
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${expiredToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('ACCESS_TOKEN_EXPIRED');
+  });
+
+  it('rechaza un usuario autenticado sin rol admin', async () => {
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('hace rollback y no filtra detalles ante un error SQL', async () => {
+    (mock.transactionRequest.query as jest.Mock)
+      .mockRejectedValueOnce(new Error('Violation of UNIQUE KEY con datos internos'));
+
+    const res = await request(app)
+      .post('/api/alumnos/30999/inscripciones')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ IdMateriaDivision: 15 });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      success: false,
+      message: 'No se pudo inscribir al alumno',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(JSON.stringify(res.body)).not.toContain('UNIQUE KEY');
+    const transaction = (mock.pool.Transaction as jest.Mock).mock.results.at(-1)?.value;
+    expect(transaction.rollback).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -337,3 +337,315 @@ describe('GET /api/reportes/rendimiento - validacion de parametros', () => {
     expect(res.body.message).toContain('estado');
   });
 });
+
+describe('GET /api/reportes/rendimiento-evaluaciones', () => {
+  const reportRecordsets = (overrides?: {
+    kpis?: Record<string, unknown>;
+    chart?: Record<string, unknown>[];
+    rows?: Record<string, unknown>[];
+    total?: number;
+  }) => ({
+    recordsets: [
+      [overrides?.kpis || {
+        TotalEvaluaciones: 12,
+        TotalAlumnosAlcanzados: 280,
+        TotalAlumnosUnicos: 145,
+        TotalIntentos: 260,
+        TotalEntregados: 230,
+        TotalEnProgreso: 15,
+        TotalVencidos: 5,
+        TotalAnulados: 10,
+        TotalIntentosCalificados: 210,
+        IntentosPendientesCorreccion: 20,
+        PromedioIntentosCalificados: 7.15,
+        TasaAprobacionIntentos: 74.3,
+      }],
+      overrides?.chart || [
+        { Categoria: 'Aprobados', Cantidad: 156 },
+        { Categoria: 'Desaprobados', Cantidad: 54 },
+        { Categoria: 'Pendientes de corrección', Cantidad: 20 },
+        { Categoria: 'En progreso', Cantidad: 15 },
+        { Categoria: 'Vencidos', Cantidad: 5 },
+        { Categoria: 'Anulados', Cantidad: 10 },
+      ],
+      overrides?.rows || [{
+        IdPublicacion: 47,
+        IdActividad: 18,
+        Titulo: 'Parcial SQL',
+        IdMateria: 5,
+        Materia: 'Bases de Datos',
+        IdMateriaDivision: 12,
+        Division: '2A',
+        FechaInicio: new Date('2026-08-01T12:00:00Z'),
+        FechaFin: new Date('2026-08-01T14:00:00Z'),
+        Estado: 'publicada',
+        AlumnosAlcanzados: 30,
+        AlumnosQueIniciaron: 28,
+        SinIniciar: 2,
+        IntentosTotales: 30,
+        Entregados: 27,
+        EnProgreso: 1,
+        Vencidos: 1,
+        Anulados: 1,
+        IntentosCalificados: 24,
+        IntentosPendientesCorreccion: 3,
+        PromedioIntentosCalificados: 7.15,
+        IntentosAprobados: 18,
+        IntentosDesaprobados: 6,
+        PorcentajeAprobacionIntentos: 75,
+      }],
+      [{ Total: overrides?.total ?? 12 }],
+    ],
+    recordset: [],
+  });
+
+  beforeEach(() => {
+    (mock.pool.request().query as jest.Mock).mockReset();
+  });
+
+  it('limita al docente por el idDocente autenticado y devuelve el contrato completo', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.kpis.totalEvaluaciones).toBe(12);
+    expect(res.body.data.graficos.distribucionResultados).toHaveLength(6);
+    expect(res.body.data.evaluaciones[0]).toMatchObject({
+      idPublicacion: 47,
+      idActividad: 18,
+      intentosCalificados: 24,
+      intentosPendientesCorreccion: 3,
+      porcentajeAprobacionIntentos: 75,
+    });
+    expect(res.body.data.paginacion).toEqual({ pagina: 1, limite: 20, total: 12, totalPaginas: 1 });
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdDocente', 'INT', 100542);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('MD.IdDocente = @IdDocente');
+  });
+
+  it('permite al administrador consultar el alcance institucional sin filtro docente', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(reqBuilder.input).not.toHaveBeenCalledWith('IdDocente', expect.anything(), expect.anything());
+  });
+
+  it('rechaza al rol alumno y conserva los códigos RBAC vigentes', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('rechaza una solicitud sin autenticación', async () => {
+    const res = await request(app).get('/api/reportes/rendimiento-evaluaciones');
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('ACCESS_TOKEN_MISSING');
+  });
+
+  it.each([
+    'idMateria=5',
+    'idMateriaDivision=12',
+    'idActividad=18',
+    'idPublicacion=47',
+  ])('rechaza para docente un filtro explícito fuera de alcance: %s', async (query) => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${query}`)
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('REPORT_SCOPE_FORBIDDEN');
+    expect(reqBuilder.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('aplica filtros combinados con semántica AND y parámetros SQL', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ Permitido: 1 }] })
+      .mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?idMateria=5&idMateriaDivision=12&idActividad=18&idPublicacion=47&estado=publicada&fechaDesde=2026-08-01&fechaHasta=2026-08-31&pagina=2&limite=5')
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(200);
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdMateria', 'INT', 5);
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdMateriaDivision', 'INT', 12);
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdActividad', 'INT', 18);
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdPublicacion', 'INT', 47);
+    expect(reqBuilder.input).toHaveBeenCalledWith('Estado', 'NVARCHAR', 'publicada');
+    expect(res.body.data.paginacion.pagina).toBe(2);
+  });
+
+  it.each([
+    'idMateria=0',
+    'idMateriaDivision=abc',
+    'idActividad=1.5',
+    'idPublicacion=-2',
+    'estado=inexistente',
+    'pagina=0',
+    'pagina=1.5',
+    'limite=0',
+    'limite=101',
+    'ordenarPor=nota',
+    'ordenDireccion=lateral',
+    'fechaDesde=no-es-fecha',
+    'fechaDesde=2026-02-31',
+    'filtroDesconocido=1',
+  ])('devuelve REQUEST_INVALID para query inválida: %s', async (query) => {
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${query}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REQUEST_INVALID');
+    expect(res.body.errors).toBeDefined();
+  });
+
+  it('rechaza fechas invertidas', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?fechaDesde=2026-08-31&fechaHasta=2026-08-01')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REQUEST_INVALID');
+  });
+
+  it.each([
+    ['evaluacion', 'Titulo'],
+    ['fecha', 'FechaInicio'],
+    ['promedio', 'PromedioIntentosCalificados'],
+    ['entregados', 'Entregados'],
+    ['aprobacion', 'PorcentajeAprobacionIntentos'],
+    ['pendientesCorreccion', 'IntentosPendientesCorreccion'],
+  ])('aplica ordenamiento %s con desempate estable', async (order, sqlColumn) => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?ordenarPor=${order}&ordenDireccion=asc`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain(`ORDER BY ${sqlColumn} ASC, IdPublicacion ASC`);
+  });
+
+  it('devuelve 200, arrays vacíos y valores nulos sin denominador', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      kpis: {
+        TotalEvaluaciones: 0,
+        TotalAlumnosAlcanzados: 0,
+        TotalAlumnosUnicos: 0,
+        TotalIntentos: 0,
+        TotalEntregados: 0,
+        TotalEnProgreso: 0,
+        TotalVencidos: 0,
+        TotalAnulados: 0,
+        TotalIntentosCalificados: 0,
+        IntentosPendientesCorreccion: 0,
+        PromedioIntentosCalificados: null,
+        TasaAprobacionIntentos: null,
+      },
+      chart: [],
+      rows: [],
+      total: 0,
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.evaluaciones).toEqual([]);
+    expect(res.body.data.graficos.distribucionResultados).toEqual([]);
+    expect(res.body.data.kpis.promedioIntentosCalificados).toBeNull();
+    expect(res.body.data.kpis.tasaAprobacionIntentos).toBeNull();
+    expect(res.body.data.paginacion.totalPaginas).toBe(0);
+  });
+
+  it('calcula KPIs y gráficos antes de paginar y no los altera al cambiar de página', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce(reportRecordsets({ rows: [{ IdPublicacion: 47 }], total: 25 }))
+      .mockResolvedValueOnce(reportRecordsets({ rows: [{ IdPublicacion: 48 }], total: 25 }));
+
+    const first = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?pagina=1&limite=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const second = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?pagina=2&limite=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(first.body.data.evaluaciones).not.toEqual(second.body.data.evaluaciones);
+    expect(first.body.data.kpis).toEqual(second.body.data.kpis);
+    expect(first.body.data.graficos).toEqual(second.body.data.graficos);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText.indexOf('FROM #ReporteEvaluaciones;')).toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
+  });
+
+  it('clasifica estados y corrección pendiente sin consolidar intentos múltiples', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain("I.Estado = 'entregado' AND I.NotaFinal IS NULL");
+    expect(sqlText).toContain("I.Estado = 'entregado' AND I.NotaFinal IS NOT NULL");
+    expect(sqlText).toContain("I.Estado = 'en_progreso'");
+    expect(sqlText).toContain("I.Estado = 'vencido'");
+    expect(sqlText).toContain("I.Estado = 'anulado'");
+    expect(sqlText).toContain('COUNT(I.Id) AS IntentosTotales');
+    expect(sqlText).toContain('COUNT(DISTINCT I.IdAlumno) AS AlumnosQueIniciaron');
+  });
+
+  it('evita duplicaciones separando padrón e intentos antes de agregarlos', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('INTO #Padrones');
+    expect(sqlText).toContain('INTO #Intentos');
+    expect(sqlText).toContain('LEFT JOIN #Padrones');
+    expect(sqlText).toContain('LEFT JOIN #Intentos');
+  });
+
+  it('no expone SQL ni stack ante errores internos', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockRejectedValueOnce(new Error('Invalid object name dbo.Secreto'));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      success: false,
+      message: 'No se pudo obtener el rendimiento por evaluación',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(JSON.stringify(res.body)).not.toContain('dbo.Secreto');
+  });
+});

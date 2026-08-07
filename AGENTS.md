@@ -95,7 +95,7 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Actas | Cabecera, detalles y cierre | archivos `actas.*` | Operaciones transaccionales y estados |
 | Telemetría | Navegación y alertas antifraude | archivos `telemetria.*` | Registra auditoría; no asumir anulación automática |
 | Usuarios | Cuentas, hashes, roles y activación | archivos `usuarios.*` | Integridad cruzada con Alumno/Docente |
-| Reportes | Rendimiento individual y listado | archivos `reportes.*` | Limita docentes por `idDocente` del JWT |
+| Reportes | Rendimiento por alumno y por publicación de evaluación | archivos `reportes.*` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
 
 El catálogo completo y actualizado de endpoints está en `README.md`.
 
@@ -176,9 +176,10 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 12 suites y 202 tests pasaban normalmente; auth,
-refresh, configuración, RBAC y reintentos de intentos tienen cobertura focalizada
-adicional. Las mismas 12 suites y 202 pruebas pasan con `--detectOpenHandles`.
+Estado de referencia reciente: 12 suites y 260 tests pasan normalmente; auth,
+refresh, configuración, RBAC, reintentos de intentos, inscripción idempotente y
+reportes tienen cobertura focalizada adicional. Las mismas 12 suites y 260
+pruebas pasan con `--detectOpenHandles`.
 
 ## Forma de trabajar en este proyecto
 
@@ -260,6 +261,14 @@ Convenciones:
   `request/query/execute`, especialmente en consultas múltiples.
 - `reportes.controller.ts` contiene agregaciones y filtros dinámicos delicados;
   preservar alcance docente y paginación.
+- En reportes por evaluación no existe selección académica canónica entre
+  intentos múltiples. Mantener métricas explícitamente por intento hasta que se
+  defina mejor/último/definitivo. KPIs y gráficos deben calcularse antes de
+  paginar y desde el mismo alcance SQL autorizado.
+- `InscripcionMateria` no tiene fecha de alta: “alumnos alcanzados” por una
+  publicación representa el padrón actual de la comisión, no un padrón histórico.
+- El umbral de aprobación usado por reportes es 6, pero existe deuda histórica
+  porque otros módulos usan 4; no unificarlo incidentalmente.
 
 ## Contexto recomendado para agentes
 

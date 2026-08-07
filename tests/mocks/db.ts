@@ -39,5 +39,9 @@ export const createMockPool = () => {
     Decimal: jest.fn().mockReturnValue('DECIMAL' as unknown),
   };
 
-  return { pool, connectDB: jest.fn().mockResolvedValue(undefined) };
+  return {
+    pool,
+    connectDB: jest.fn().mockResolvedValue(undefined),
+    transactionRequest,
+  };
 };

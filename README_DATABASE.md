@@ -272,7 +272,27 @@ Ejecutado por `POST /api/telemetria/alerta`. Inserta en `AlertaFraude` con `Tipo
 
 **Procedimiento:** `SP_Alumno_InscribirMateria`
 
-No expuesto actualmente como endpoint REST. Inserta en `InscripcionMateria` para vincular un alumno a una comisión.
+`POST /api/alumnos/:matricula/inscripciones` lo ejecuta para insertar en
+`InscripcionMateria` y vincular un alumno a una comisión. El procedimiento
+existente realiza únicamente el `INSERT`; la API lo envuelve en una transacción
+`SERIALIZABLE` que:
+
+1. valida que `Alumno` exista y tenga `Estado = 'activo'`;
+2. valida `MateriaDivision` mediante sus relaciones con `Materia` y `Division`,
+   y exige que la materia tenga `Estado = 1`;
+3. consulta la PK lógica con `UPDLOCK, HOLDLOCK`;
+4. devuelve el recurso existente sin insertar cuando ya está inscripto;
+5. ejecuta el SP y confirma la transacción cuando la relación es nueva.
+
+La PK compuesta `(IdMateriaDivision, IdAlumno)` permanece como garantía física
+final. Esta combinación evita duplicados incluso con solicitudes concurrentes y
+múltiples instancias de la API conectadas a SQL Server. No se agregó ni modificó
+esquema, índice, constraint, migración o procedimiento.
+
+La inscripción habilita las lecturas ya relacionadas con
+`InscripcionMateria`: materias del alumno, alumnos de la comisión y evaluaciones
+pendientes publicadas para esa comisión. No modifica filas de `Publicacion`,
+`Intento`, `Respuesta`, `ActaMateria` ni sus detalles.
 
 ### 3.8 Procedimientos CRUD por Módulo
 

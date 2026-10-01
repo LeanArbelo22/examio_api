@@ -17,7 +17,7 @@ beforeAll(() => {
   process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
   process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   adminToken = jwt.sign({ id: 1, email: 'admin@test.com', role: 'admin' }, process.env.JWT_SECRET);
-  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
+  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente', idDocente: 10 }, process.env.JWT_SECRET);
   alumnoToken = jwt.sign({ id: 3, email: 'alumno@test.com', role: 'alumno' }, process.env.JWT_SECRET);
   invalidToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.malformed';
   app = require('../src/app').app;
@@ -129,18 +129,21 @@ describe('RBAC - Protección de rutas por rol', () => {
     it('POST /api/evaluaciones/guardar-completo - docente autorizado', async () => {
       const tx = new mock.pool.Transaction();
       const txRequest = tx.request();
-      (txRequest.execute as jest.Mock).mockResolvedValueOnce({ recordset: [{ IdActividad: 1 }] });
       (txRequest.query as jest.Mock)
-        .mockResolvedValueOnce({})
-        .mockResolvedValueOnce({ recordset: [{ Id: 1 }] })
+        .mockResolvedValueOnce({ recordset: [] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 900 }] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 1, IdDocente: 10, DocenteActivo: true }] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 1, Revision: 1 }] })
         .mockResolvedValueOnce({ recordset: [{ Id: 1 }] })
         .mockResolvedValueOnce({});
 
       const res = await request(app)
         .post('/api/evaluaciones/guardar-completo')
         .set('Authorization', `Bearer ${docenteToken}`)
+        .set('Idempotency-Key', '00000000-0000-4000-8000-000000000030')
         .send({
           Titulo: 'Test',
+          Estado: 'borrador',
           Tipo: 'evaluacion',
           CantidadIntentosMaximos: 2,
           DuracionMinutos: 60,

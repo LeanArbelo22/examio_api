@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 260 tests de integración con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 337 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -704,6 +704,8 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 |---|---|---|---|---|
 | POST | `/api/evaluaciones/guardar-completo` | `ActividadSchema` | `admin`, `docente` |
 | PUT | `/api/evaluaciones/:id/modificar-completo` | `ActividadUpdateSchema` | `admin`, `docente` |
+| POST | `/api/evaluaciones/:idActividad/publicar-completo` | `PublicarActividadSchema` | `admin`, `docente` |
+| POST | `/api/evaluaciones/:id/importar-banco` | `ImportarBancoSchema` | `docente` |
 | PUT | `/api/evaluaciones/:id/estado` | — | `admin`, `docente` |
 | GET | `/api/evaluaciones/intento/:idIntento/renderizar` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento` | — | `alumno`, `admin`, `docente` |
@@ -714,7 +716,9 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 
 **Body `POST /api/evaluaciones/guardar-completo`:**
 
-> El campo `Estado` es opcional. Si no se envía, se crea como `'publicada'`. Si se envía `'borrador'`, la actividad se crea en estado borrador y puede editarse luego vía `PUT /api/evaluaciones/:id/modificar-completo`.
+> `Idempotency-Key` (UUID) es obligatorio. Por compatibilidad, omitir `Estado`
+> conserva el comportamiento publicado. Con `Estado: "borrador"` solo son obligatorios
+> `Titulo` e `IdMateriaDivision`; el servidor completa tipo, intentos, duración y fechas.
 
 ```json
 {
@@ -743,6 +747,26 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
       ]
     }
   ]
+}
+```
+
+Un borrador admite cero grupos, grupos sin variantes, títulos/enunciados temporales
+vacíos y preguntas incompletas. Defaults: `Tipo=evaluacion`, un intento, 90 minutos,
+inicio UTC ahora + 5 minutos, fin inicio + 24 horas y `GruposPreguntas=[]`. Las fechas
+pueden quedar en el pasado al editar, pero siempre debe cumplirse `FechaFin > FechaInicio`.
+La creación responde:
+
+```json
+{
+  "success": true,
+  "data": {
+    "idActividad": 42,
+    "idPublicacion": 15,
+    "estado": "borrador",
+    "revision": 1,
+    "importaciones": [],
+    "banco": []
+  }
 }
 ```
 
@@ -790,6 +814,7 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
     "duracionMinutos": 120,
     "cantidadIntentosMaximos": 2,
     "estado": "publicada",
+    "revision": 2,
     "recursosPermitidos": null,
     "idPublicacion": 5,
     "fechaInicio": "2026-06-15T10:00:00.000Z",
@@ -848,9 +873,11 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 
 > ⚠️ **Solo funciona en estado `borrador`.** Si la actividad está `publicada` o `archivada`, el endpoint responde `400 Bad Request`.
 >
-> El payload es idéntico al de creación (`POST /evaluaciones/guardar-completo`) con dos diferencias:
+> El payload es el contrato de borrador e incluye:
 > 1. Incluye `IdPublicacion` para identificar la publicación a actualizar.
-> 2. Los objetos anidados (`GrupoPregunta`, `Pregunta`, `Opcion`) pueden incluir un campo `Id` opcional. Si se envía, el registro se actualiza; si no, se crea uno nuevo.
+> 2. `RevisionEsperada`, obligatoria. Una revisión obsoleta responde 409
+>    `DRAFT_REVISION_CONFLICT`.
+> 3. Los objetos anidados (`GrupoPregunta`, `Pregunta`, `Opcion`) pueden incluir un campo `Id` opcional. Si se envía, el registro se actualiza conservando su ID; si no, se crea uno nuevo.
 >
 > **Comportamiento inteligente:** Dentro de una transacción atómica, el endpoint:
 > - Actualiza los datos macro de `Actividad` y `Publicacion`.
@@ -869,6 +896,7 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
   "FechaInicio": "2026-06-16T10:00:00Z",
   "FechaFin": "2026-06-16T12:00:00Z",
   "IdPublicacion": 5,
+  "RevisionEsperada": 1,
   "GruposPreguntas": [
     {
       "Id": 10,
@@ -1553,16 +1581,17 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | | `CondicionFinal` | `z.enum([...])` | Sí |
 | `ActividadSchema` | `Titulo` | `z.string()` | Sí |
 | | `Descripcion` | `z.string()` | No |
-| | `Tipo` | `z.enum([...])` | Sí |
-| | `CantidadIntentosMaximos` | `z.number().int()` | Sí |
-| | `DuracionMinutos` | `z.number().int()` | Sí (nullable) |
+| | `Tipo` | `z.enum([...])` | No (default `evaluacion`) en borrador |
+| | `CantidadIntentosMaximos` | `z.number().int().min(1).max(10)` | No (default `1`) en borrador |
+| | `DuracionMinutos` | entero positivo o `null` | No (default `90`) en borrador |
 | | `RecursosPermitidos` | `z.string()` | No |
 | | `IdMateriaDivision` | `z.number().int()` | Sí |
-| | `FechaInicio` | `z.string().datetime()` | Sí |
-| | `FechaFin` | `z.string().datetime()` | Sí |
+| | `FechaInicio` | `z.string().datetime()` | No (ahora UTC + 5 min) en borrador |
+| | `FechaFin` | `z.string().datetime()` | No (inicio + 24 h) en borrador |
 | | `Estado` | `z.enum(['borrador', 'publicada'])` | No (default `'publicada'`) |
-| | `GruposPreguntas` | `z.array(GrupoPreguntaBaseSchema)` | Sí |
+| | `GruposPreguntas` | estructura estricta de borrador/publicación | No (`[]`) en borrador; mínimo 1 publicada |
 | `ActividadUpdateSchema` | `IdPublicacion` | `z.number().int()` | Sí |
+| | `RevisionEsperada` | entero positivo | Sí |
 | | `Titulo` | `z.string()` | Sí |
 | | `Descripcion` | `z.string()` | No |
 | | `Tipo` | `z.enum([...])` | Sí |
@@ -1572,7 +1601,10 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | | `IdMateriaDivision` | `z.number().int()` | Sí |
 | | `FechaInicio` | `z.string().datetime()` | Sí |
 | | `FechaFin` | `z.string().datetime()` | Sí |
-| | `GruposPreguntas` | `z.array(GrupoPreguntaSchema con Id opcional en cada nivel)` | Sí |
+| | `GruposPreguntas` | estructura de borrador con Id opcional en cada nivel | No (default `[]`) |
+| `PublicarActividadSchema` | `IdPublicacion`, `RevisionEsperada` | enteros positivos | Sí |
+| | `GuardarTodoEnBanco` | `z.boolean()` | Sí |
+| | `GruposPreguntas` | estructura publicable estricta | Sí, mínimo 1 |
 | `IniciarExamenSchema` | `IdPublicacion` | `z.number().int()` | Sí |
 | | `IdAlumno` | `z.number().int()` | Sí |
 | `GuardarRespuestaSchema` | `IdIntento` | `z.number().int()` | Sí |
@@ -1651,7 +1683,7 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (260 tests)
+npm test            # Suite completa (337 tests de referencia actual)
 npx jest --verbose  # Reporte detallado (260 tests)
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
@@ -1747,3 +1779,289 @@ rotatorios. Permanecen dos tareas operativas:
 Ambos endpoints ejecutan el mismo SP (`SP_Docente_VerMaterias`), por lo que devuelven datos idénticos. Es un error por copy-paste. `getMateriasByDocente` debería llamar a un SP diferente (ej. `SP_Docente_ObtenerMaterias`) o ejecutar una query directa que retorne solo las materias del docente.
 
 **Fix pendiente:** Corregir `getMateriasByDocente` para que consulte datos de materias (no comisiones).
+
+## Banco privado de preguntas (backend v1)
+
+Requiere aplicar manualmente `migrations/20260908_banco_preguntas.sql` antes de desplegar
+este backend. Las verificaciones de solo lectura están en
+`scripts/verificar-banco-preguntas.sql`. No se migra contenido académico existente.
+El estado de implementación y los pendientes de frontend/SQL están en `PLAN.md`.
+
+El banco pertenece a `Docente.Legajo`, obtenido de `idDocente` del JWT. El docente
+debe estar activo. Los administradores solo consultan; alumnos no tienen acceso.
+Los administradores deben indicar `?idDocente=<legajo>` también en detalles y etiquetas.
+Los docentes no pueden elegir un propietario distinto. Un ID ajeno responde 404.
+
+### Endpoints del banco
+
+Base: `/api/banco-preguntas`. Escrituras en PascalCase; respuestas en camelCase.
+Para preguntas/grupos, `PUT` reemplaza el contenido completo: enviar opciones,
+etiquetas, composición y estado deseados; omisiones toman los defaults de creación.
+
+| Método | Path | Roles | Resultado |
+|---|---|---|---|
+| GET | `/preguntas` | docente, admin | Listado paginado de metadatos, sin opciones |
+| GET | `/preguntas/:id` | docente, admin | Detalle con opciones y claves de corrección |
+| POST | `/preguntas` | docente | Crear pregunta, 201 |
+| PUT | `/preguntas/:id` | docente | Reemplazar pregunta con `RevisionEsperada`, 200 |
+| PATCH | `/preguntas/:id/estado` | docente | Cambiar estado con `RevisionEsperada` |
+| GET | `/grupos` | docente, admin | Listado paginado |
+| GET | `/grupos/:id` | docente, admin | Composición, posición y revisión actual de cada pregunta |
+| POST | `/grupos` | docente | Crear grupo, 201 |
+| POST | `/grupos/desde-contenido` | docente | Crear grupo y preguntas nuevas/propias en una transacción, 201 |
+| PUT | `/grupos/:id` | docente | Reemplazar composición con `RevisionEsperada` |
+| PATCH | `/grupos/:id/estado` | docente | Cambiar estado con `RevisionEsperada` |
+| GET | `/etiquetas` | docente, admin | Etiquetas del propietario, ordenadas por nombre |
+| POST | `/etiquetas` | docente | Crear etiqueta, 201 |
+| PUT | `/etiquetas/:id` | docente | Renombrar etiqueta |
+| DELETE | `/etiquetas/:id` | docente | Eliminar etiqueta y asociaciones, sin borrar contenido |
+| POST | `/desde-evaluacion` | docente | Copiar selección autorizada como borradores, 201 |
+
+Listados de preguntas/grupos: `texto`, `estado`, `etiqueta`, `pagina` (1 por defecto,
+máximo 1.000.000), `tamano` (20 por defecto, máximo 100); `tipo` solo para preguntas.
+Texto busca una subcadena literal, no un patrón SQL. Sin estado, devuelve borradores
+y disponibles. Para ver archivados enviar `estado=archivado`.
+Orden: actualización descendente e ID descendente. Respuesta:
+`{ success: true, data: { items, total, pagina, tamano } }`; `total` no depende de la página.
+
+Pregunta de ejemplo:
+
+```json
+{
+  "Titulo": "Protocolos de transporte",
+  "Enunciado": "¿Cuál de estos es un protocolo de transporte?",
+  "Tipo": "mc",
+  "Estado": "disponible",
+  "Opciones": [
+    { "Texto": "TCP", "EsCorrecta": true },
+    { "Texto": "RAM", "EsCorrecta": false }
+  ],
+  "Etiquetas": []
+}
+```
+
+Para un borrador basta `Titulo` y `Tipo`: enunciado vacío, opciones/etiquetas vacías
+y estado borrador son los defaults. En `PUT` agregar `RevisionEsperada` con la
+revisión leída. `Titulo`: 150 caracteres; enunciado: 100.000; opción: 500;
+máximo 100 opciones y 200 etiquetas por recurso. Se rechazan campos desconocidos,
+incluido un propietario enviado en el body.
+
+Grupo de ejemplo (IDs ilustrativos, pertenecientes al docente):
+
+```json
+{
+  "TituloReferencia": "Redes: variantes equivalentes",
+  "Estado": "disponible",
+  "Preguntas": [10, 11],
+  "Etiquetas": [3]
+}
+```
+
+El orden de `Preguntas` y `Opciones` determina su posición en el banco. Un grupo
+contiene hasta 200 preguntas diferentes. Las etiquetas pueden asignarse a preguntas
+y grupos; su nombre tiene hasta 50 caracteres. Se ignoran espacios exteriores y
+mayúsculas al detectar nombres duplicados para un mismo propietario.
+Body de etiqueta: `{ "Nombre": "Redes" }`.
+
+### Disponibilidad y revisiones
+
+`borrador` permite contenido incompleto. `disponible` requiere:
+
+- Enunciado no vacío.
+- `mc`: al menos dos opciones, textos no vacíos y exactamente una correcta.
+- `vf`: exactamente `Verdadero` y `Falso` (sin distinción de mayúsculas), una correcta.
+- `abierta`: sin opciones.
+- `code`: no habilitado para uso en v1; puede conservarse como borrador.
+- Grupo no vacío y todas sus variantes disponibles.
+
+`archivado` conserva el contenido e impide nuevas importaciones. Puede restaurarse
+a borrador o disponible (con validación). Body de cambio de estado:
+`{ "Estado": "archivado", "RevisionEsperada": 2 }`.
+
+Editar una pregunta disponible la mantiene disponible si sigue siendo válida.
+Retirarla de disponibilidad devuelve a borrador sus grupos disponibles en la misma
+transacción. La respuesta de pregunta/estado incluye `gruposAfectados: [{ id, revision }]`.
+Las revisiones de preguntas/grupos se incrementan al modificarlos; una revisión
+desactualizada devuelve 409. Cambiar una variante no incrementa por sí mismo la
+revisión del grupo: la importación verifica ambas. No hay historial de versiones.
+
+### Incorporar contenido a una evaluación
+
+`POST /api/evaluaciones/:id/importar-banco` (solo docente) agrega copias a un borrador
+guardado, sin reemplazar el resto. Exige que no tenga intentos y que todas las
+publicaciones pertenezcan a comisiones del docente.
+
+```json
+{
+  "ImportacionesBanco": [
+    { "Tipo": "pregunta", "IdPregunta": 10, "RevisionEsperada": 2,
+      "TituloReferencia": "Una consigna de redes" },
+    { "Tipo": "grupo", "IdGrupo": 20, "RevisionEsperada": 3,
+      "Preguntas": [{ "IdPregunta": 11, "RevisionEsperada": 1 }] }
+  ]
+}
+```
+
+Un grupo requiere la lista completa de sus preguntas y revisiones actuales; la
+composición o revisión cambiada devuelve 409. Máximo 100 selecciones. No puede
+repetirse una pregunta dentro de la solicitud, ni a través de distintos grupos.
+No se deduplica por texto. `Idempotency-Key` evita repetir la misma operación ante
+reintentos; una clave nueva representa una solicitud explícita nueva.
+
+El mismo campo opcional `ImportacionesBanco` se admite en
+`POST /api/evaluaciones/guardar-completo` y `PUT /api/evaluaciones/:id/modificar-completo`.
+Conservar el resto del payload actual, incluido `GruposPreguntas` (puede ser `[]`
+al crear exclusivamente desde el banco). En la edición completa, `GruposPreguntas`
+sigue siendo reemplazo: omitir grupos anteriores de esa lista los elimina.
+Las importaciones se agregan después del contenido manual, en la misma transacción.
+
+Una pregunta individual crea un grupo nuevo con una sola variante. Un grupo crea
+todas sus variantes. Todos los IDs de destino son nuevos; no enviar IDs del banco
+como IDs anidados de evaluación. La edición normal permite adaptar el contenido
+copiado; no permite trasladar IDs existentes entre grupos.
+
+El endpoint dedicado devuelve 201 con
+`data: { importaciones: [...], revision: 3 }`. Cada importación conserva el mapping
+`{ idGrupo, idBancoGrupo, preguntas: [{ idPregunta, idBancoPregunta,
+revisionBancoOrigen, opciones: [{ idOpcion, idBancoOpcion }] }] }`.
+Creación completa conserva `data.idActividad` y agrega `data.importaciones`;
+edición completa conserva `message` y agrega `data.importaciones` cuando corresponde.
+Sin importaciones se preservan las respuestas anteriores.
+
+El contenido siempre se lee del banco en el servidor. La procedencia es informativa.
+El detalle de evaluación devuelve `idBancoGrupoOrigen`/`idBancoPreguntaOrigen`,
+`revisionBancoOrigen` y `fechaIncorporacionBanco` en los grupos/preguntas respectivos.
+No hay sincronización con copias existentes. Cambiar o archivar el banco no altera
+evaluaciones, intentos ni opciones ya copiadas. Una copia adaptada conserva su origen,
+pero la revisión de origen no certifica que siga siendo idéntica.
+
+### Copiar evaluaciones anteriores hacia el banco
+
+`POST /api/banco-preguntas/desde-evaluacion`:
+
+```json
+{ "IdActividad": 5, "Preguntas": [100], "Grupos": [30] }
+```
+
+Se exige al menos una selección y pertenencia de todos los IDs a esa actividad.
+No superponer preguntas sueltas con preguntas incluidas en los grupos seleccionados.
+Solo el docente con alcance sobre todas las publicaciones puede copiar. La actividad
+puede estar publicada o archivada: se lee, no se modifica. Se crean borradores propios,
+sin etiquetas; el título inicial de cada pregunta toma el título del grupo original.
+Respuesta: `data.preguntas` con `{ idPreguntaOrigen, idBancoPregunta }` y `data.grupos`
+con `{ idGrupoOrigen, idBancoGrupo, preguntas }`. No se atribuye autoría histórica ni
+se deduplica por texto. El administrador no puede realizar esta operación.
+
+### Cambios de seguridad en evaluaciones
+
+Crear exige comisión propia; modificar exige alcance sobre todas las publicaciones
+y también sobre la comisión destino. Admin conserva gestión de evaluaciones, pero
+no importa bancos ajenos. Se verifican IDs de publicación, grupos, preguntas y opciones
+antes de modificar la estructura; un fallo revierte toda la operación.
+
+Transiciones: borrador → publicada/archivada; publicada → archivada. No hay reapertura.
+Repetir el mismo estado no modifica datos. Toda edición/importación estructural exige
+borrador sin intentos. Los controles se ejecutan dentro de la transacción, con bloqueo
+común de la actividad. No se agregaron triggers contra modificaciones SQL manuales.
+
+Errores: 400 validación/contenido/estado; 401 autenticación; 403 rol o alcance de
+evaluación; 404 recurso inexistente/ajeno en banco; 409 revisión o conflicto; 500
+persistencia con mensaje genérico. El frontend debe recargar ante 409 y no reintentar
+con una clave nueva tras una respuesta incierta: debe repetir la misma `Idempotency-Key`.
+
+### Grupo compuesto desde el editor
+
+`POST /api/banco-preguntas/grupos/desde-contenido` permite mezclar preguntas propias
+existentes y nuevas sin guardar la evaluación. Requiere `Idempotency-Key` y crea todo
+en una transacción. `Origen` es una unión discriminada estricta:
+
+```json
+{
+  "TituloReferencia": "Redes: variantes equivalentes",
+  "Etiquetas": [3],
+  "Preguntas": [
+    { "Origen": "existente", "IdPregunta": 10, "RevisionEsperada": 2 },
+    {
+      "Origen": "nueva",
+      "ClaveCliente": "4e096ceb-51fd-49a1-8f80-c3760edaf021",
+      "Pregunta": { "Titulo": "TCP", "Enunciado": "", "Tipo": "mc", "Opciones": [], "Etiquetas": [] }
+    }
+  ]
+}
+```
+
+Las claves cliente y los IDs existentes no se repiten; hay entre 1 y 200 variantes.
+Las nuevas preguntas y el grupo quedan en borrador y conservan el orden enviado.
+Respuesta: `data.grupo { id, revision, estado }` y
+`data.preguntas [{ claveCliente, id, revision }]` para las preguntas nuevas.
+
+### Referencias opcionales del banco
+
+Grupos y variantes manuales de creación, edición y publicación aceptan respectivamente
+`ReferenciaBanco: { IdGrupo, RevisionEsperada }` y
+`ReferenciaBanco: { IdPregunta, RevisionEsperada }`. Se valida propiedad y revisión;
+los IDs del banco nunca se usan como IDs de evaluación. Una actualización conserva
+la procedencia si omite la referencia, puede agregarla a un objeto que todavía no la
+tenía y no puede sustituir un origen ya persistido por otro. No existe sincronización.
+
+### Publicación completa
+
+`POST /api/evaluaciones/:idActividad/publicar-completo` recibe el contenido completo
+del borrador, `IdPublicacion`, `RevisionEsperada`, `GuardarTodoEnBanco` obligatorio e
+`ImportacionesBanco` opcional. También requiere `Idempotency-Key`.
+
+En una única transacción: bloquea y autoriza la actividad, comprueba revisión/ausencia
+de intentos, guarda la última edición, resuelve importaciones, valida desde SQL la
+estructura final, opcionalmente resuelve el banco, publica e incrementa la revisión.
+La validación autoritativa exige ventana no vencida, al menos un grupo y una variante,
+enunciados completos, `mc` con dos opciones y una correcta, `vf` con Verdadero/Falso
+y una correcta, y `abierta`/`code` sin opciones. `code` puede publicarse en evaluación,
+pero al copiarse al banco queda como borrador.
+
+Con `GuardarTodoEnBanco=true`, una referencia se reutiliza solo si contenido, estado
+y composición ordenada actuales coinciden. Si difiere, se crea una copia independiente;
+no se actualiza la anterior ni se deduplica por texto. Preguntas válidas mc/vf/abierta
+y sus grupos completos quedan disponibles; code y cualquier grupo que lo contenga,
+en borrador. La respuesta contiene IDs, estado, nueva revisión, importaciones y mappings
+en `data.banco`. Cualquier fallo produce rollback de evaluación, banco e idempotencia.
+El cambio de estado legacy ya no permite publicar un borrador: debe usarse este endpoint.
+
+### Idempotencia persistente y errores estables
+
+Es obligatorio un UUID en `Idempotency-Key` para: creación/publicación completa,
+importación del banco, creación de pregunta/grupo, grupo desde contenido y copia desde
+evaluación. SQL Server identifica actor + operación + clave y conserva SHA-256 del body,
+estado, resultado mínimo, status y fechas UTC. No almacena tokens, contraseñas,
+enunciados, opciones ni claves correctas. Misma clave/body reproduce el resultado;
+otro body responde 409 `IDEMPOTENCY_KEY_REUSED`. La reserva y el resultado forman parte
+de la transacción de negocio, por lo que un rollback no registra éxito. La expiración
+se fija a siete días; no hay job automático de purga y cualquier limpieza debe ser una
+operación administrada separada.
+
+| Código | HTTP | Significado |
+|---|---:|---|
+| `DRAFT_REVISION_CONFLICT` | 409 | El borrador cambió desde la lectura |
+| `BANK_REVISION_CONFLICT` | 409 | Cambió una pregunta/grupo referenciado |
+| `IDEMPOTENCY_KEY_REUSED` | 409 | Misma clave con otro request |
+| `DRAFT_NOT_PUBLISHABLE` | 400 | La estructura/configuración final es inválida |
+| `BANK_CONTENT_INVALID` | 400 | Contenido o composición del banco inválidos |
+| `EVALUATION_ALREADY_PUBLISHED` | 400 | La actividad ya no es editable |
+| `EVALUATION_HAS_ATTEMPTS` | 409 | Existen intentos y la estructura es inmutable |
+
+### Migración y despliegue
+
+Después de `20260908_banco_preguntas.sql`, aplicar manualmente
+`migrations/20260926_evaluacion_revision_idempotencia.sql`. Agrega y rellena
+`Actividad.Revision`, y crea `OperacionIdempotente` con unicidad e índices. Ambas
+migraciones son aditivas, transaccionales e idempotentes; el backend nunca las ejecuta
+al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
+`scripts/verificar-evaluacion-idempotencia.sql` primero sobre SQL Server aislado.
+Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
+
+Validación local de esta entrega: `npm test -- --runInBand` y
+`npx jest --runInBand --detectOpenHandles`, ambos con 16 suites/337 pruebas. El puerto
+55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
+global preexistente (`rootDir` sin `include`, y después la incompatibilidad
+NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server
+real ni se aplicaron migraciones: repetición de DDL, constraints, concurrencia,
+deadlocks y rollback real siguen pendientes en una base aislada autorizada.

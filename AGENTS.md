@@ -24,7 +24,7 @@ HTTP
   -> app.ts / routes
   -> checkRole y validateRequest
   -> controller
-  -> service (solo auth) o acceso directo con mssql
+  -> service (auth/banco y autorización de evaluaciones) o acceso directo con mssql
   -> Stored Procedure o SQL parametrizado
   -> mapKeysToCamelCase
   -> JSON { success, data/message }
@@ -36,8 +36,9 @@ HTTP
   `listen()`. Es el único lugar que debe usar el `PORT` fijo.
 - Routes declaran método, path, RBAC, Zod y controller.
 - Controllers mezclan actualmente HTTP, reglas, orquestación y persistencia.
-- Auth tiene services para credenciales, JWT y sesiones rotatorias; no existe
-  `src/repositories/`.
+- Auth tiene services para credenciales, JWT y sesiones rotatorias. Banco tiene
+  services de gestión/copia transaccional, escritura/autorización de evaluaciones e
+  idempotencia persistente; no existe `src/repositories/`.
 - Schemas Zod en `src/schemas/`, normalmente con campos PascalCase.
 - `checkRole` y `validateRequest` viven en `auth.middleware.ts`.
 - Pool singleton en `config/db.ts`; `mapKeysToCamelCase` adapta resultados.
@@ -66,7 +67,7 @@ api_node/
 │   ├── config/db.ts          # pool SQL singleton
 │   ├── routes/               # entrada HTTP por módulo
 │   ├── controllers/          # handlers y acceso a datos
-│   ├── services/             # actualmente solo auth
+│   ├── services/             # auth, banco y autorización de evaluaciones
 │   ├── schemas/              # validación Zod
 │   ├── middlewares/          # JWT, RBAC y validación
 │   └── utils/                # adaptación camelCase
@@ -82,6 +83,7 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Módulo | Responsabilidad | Entrada principal | Observaciones |
 |---|---|---|---|
 | Health | Identidad y disponibilidad API/SQL | `health.routes.ts`, `health.controller.ts` | Público; `service` debe ser exactamente `examio-api` |
+| Banco | Preguntas propias, grupos, etiquetas y copias | `banco.routes.ts`, `banco.controller.ts`, services `banco*` | Admin consulta; solo docente propietario escribe; copias independientes |
 | Auth | Login, access JWT, refresh rotatorio y logout | `auth.routes.ts`, `auth.controller.ts`, `auth.service.ts`, `auth-token.service.ts` | Sesiones persistidas en SQL; refresh opaco de un solo uso |
 | Admin | Dashboard analítico | `admin.routes.ts`, `admin.controller.ts` | SQL agregado y filtros; solo admin |
 | Alumnos | CRUD, materias y estadísticas | archivos `alumnos.*` | CRUD mediante SP; estadísticas con SQL inline |
@@ -90,7 +92,7 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Materias | CRUD, divisiones, alumnos y comisiones | archivos `materias.*` | Varias rutas legacy carecen de RBAC |
 | Divisiones | Catálogo y CRUD parcial | archivos `divisiones.*` | Update/delete devuelven 501 |
 | Comisiones | MateriaDivision y alumnos | archivos `comisiones.*` | `MateriaDivision` es una relación central |
-| Evaluaciones | Actividades, publicaciones, grupos, preguntas y variantes | archivos `evaluaciones.*` | Creación/edición transaccional; mezcla SP y SQL inline |
+| Evaluaciones | Actividades, borradores, publicación, grupos, preguntas y variantes | archivos `evaluaciones.*`, services `evaluacion-*` | Revisión optimista; publicación y guardado en banco transaccionales |
 | Intentos | Inicio, respuestas, entrega y corrección | archivos `intentos.*` | Flujo crítico y dependiente de SPs |
 | Actas | Cabecera, detalles y cierre | archivos `actas.*` | Operaciones transaccionales y estados |
 | Telemetría | Navegación y alertas antifraude | archivos `telemetria.*` | Registra auditoría; no asumir anulación automática |
@@ -176,10 +178,10 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 12 suites y 260 tests pasan normalmente; auth,
-refresh, configuración, RBAC, reintentos de intentos, inscripción idempotente y
-reportes tienen cobertura focalizada adicional. Las mismas 12 suites y 260
-pruebas pasan con `--detectOpenHandles`.
+Estado de referencia reciente: 16 suites y 337 tests pasan, también con
+`--runInBand --detectOpenHandles`. Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
+revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
+verificación en una base aislada; los mocks no prueban esos comportamientos reales.
 
 ## Forma de trabajar en este proyecto
 
@@ -211,6 +213,8 @@ Convenciones:
 - Tests importan `src/app.ts`; Jest finaliza naturalmente y deja 55803 libre.
 - Módulo de reportes agregado: rendimiento individual/listado, filtros,
   paginación y alcance docente.
+- Borradores incompletos, publicación completa, referencias al banco e idempotencia
+  persistente requieren la migración `20260926_evaluacion_revision_idempotencia.sql`.
 - Auth emite access JWT HS256 + refresh opaco, persiste familias en
   `AuthSession`/`AuthRefreshToken`, rota con bloqueo SQL y expone refresh/logout.
 - Base local fue poblada con datos demo de reportes, pero ninguna sesión debe
@@ -245,6 +249,21 @@ Convenciones:
 - Carreras, materias y comisiones tienen rutas legacy sin `checkRole`, incluidas
   algunas mutaciones. Cambiarlas puede romper clientes: acordar el cambio.
 - Los IDs anidados de edición completa de evaluaciones son críticos.
+- `Idempotency-Key` UUID es obligatorio en los POST de creación/copia/publicación
+  documentados. Reintentar con la misma clave/body; otra clave crea otra operación.
+- `Actividad.Revision` no es historial. Edición/publicación comparan
+  `RevisionEsperada`; importación incrementa y devuelve la revisión.
+- Banco privado: propiedad por `Docente.Legajo`, estados y revisión optimista.
+  `code` solo como borrador en v1. Admin no escribe ni importa bancos.
+  Migración `20260908_banco_preguntas.sql` manual antes de desplegar. Nunca ejecutar al arrancar.
+- Aplicar después `20260926_evaluacion_revision_idempotencia.sql`; ambas migraciones
+  deben repetirse y verificarse primero en SQL Server aislado.
+- Edición/importación de evaluaciones exige borrador sin intentos y alcance sobre
+  todas las publicaciones. No se permite reapertura de publicada/archivada.
+  Validar IDs anidados; coordinar edición/estado por bloqueo transaccional de Actividad.
+- Las copias de banco son snapshots de contenido en las tablas actuales, no vínculos
+  vivos. Preservar procedencia al adaptar un borrador; nunca sincronizar exámenes.
+  Banco no tiene historial de versiones ni protección frente a UPDATE SQL manual.
 - Intentos, respuestas, finalización y variantes dependen de consistencia entre
   varios SPs y tablas.
 - Las transacciones de evaluaciones y actas deben hacer rollback ante cualquier

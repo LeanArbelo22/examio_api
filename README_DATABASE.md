@@ -51,7 +51,7 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 
 | Tabla | Clave Primaria | Rol |
 |---|---|---|
-| `Actividad` | `Id INT IDENTITY` | Cabecera de evaluación/tp/tarea. Campos: `Titulo`, `Descripcion`, `Tipo` (CHECK: `'evaluacion'`, `'tp'`, `'tarea'`), `PermiteMultiplesIntentos BIT` (columna legacy del DDL, no utilizada por la API Node actual, la cual delega la lógica en `CantidadIntentosMaximos INT`), `DuracionMinutos INT`, `Estado` (CHECK: `'borrador'`, `'publicada'`, `'archivada'`), `RecursosPermitidos`. |
+| `Actividad` | `Id INT IDENTITY` | Cabecera de evaluación/tp/tarea. Campos: `Titulo`, `Descripcion`, `Tipo` (CHECK: `'evaluacion'`, `'tp'`, `'tarea'`), `PermiteMultiplesIntentos BIT` (legacy), `CantidadIntentosMaximos INT`, `DuracionMinutos INT`, `Estado` (CHECK: `'borrador'`, `'publicada'`, `'archivada'`), `RecursosPermitidos` y `Revision INT` positiva para concurrencia optimista. |
 | `Publicacion` | `Id INT IDENTITY` | Instancia publicada de una `Actividad` en una `MateriaDivision`. Define ventana de tiempo (`FechaInicio`, `FechaFin`) y visibilidad (`Visible BIT`). |
 | `GrupoPregunta` | `Id INT IDENTITY` | Agrupación lógica de preguntas. FK a `Actividad(Id)`. Campos: `TituloReferencia` (ej. "SQL Básico"). |
 | `Pregunta` | `Id INT IDENTITY` | Pregunta individual. FK a `GrupoPregunta(Id)`. Campos: `Enunciado NVARCHAR(MAX)`, `Tipo` (CHECK: `'mc'`, `'vf'`, `'abierta'`, `'code'`). |
@@ -88,6 +88,7 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | `Usuario` | `Id INT IDENTITY` | Cuentas de acceso al sistema. `Email` unique. `PasswordHash NVARCHAR(255)` (hash de bcrypt). `Rol` (CHECK: `'docente'`, `'alumno'`, `'admin'`). FK opcionales a `Docente(Legajo)` y `Alumno(Matricula)` con CHECK cruzado que asegura que un docente tenga `IdDocente` no nulo y `IdAlumno` nulo, y viceversa. `Activo BIT`. |
 | `AuthSession` | `Id UNIQUEIDENTIFIER` | Familia de credenciales asociada a `Usuario`. Conserva creación, expiración absoluta, última actividad y revocación. No contiene tokens. |
 | `AuthRefreshToken` | `Id UNIQUEIDENTIFIER` | Eslabón de rotación de una sesión. Conserva hash SHA-256, expiraciones, consumo, sucesor, clave de idempotencia y snapshot no sensible de claims. Nunca guarda el refresh o access token completo. |
+| `OperacionIdempotente` | `Id BIGINT IDENTITY` | Idempotencia general por actor, operación y UUID. Guarda hash determinista, estado, resultado mínimo, status HTTP y fechas UTC; no persiste payload académico ni credenciales. |
 
 ---
 
@@ -518,4 +519,88 @@ AuthRefreshToken 0..1 ── 1 AuthRefreshToken (sucesor)
 - Todos los SPs retornan `recordset`. La API consume `result.recordset` directamente. No se utilizan `OUTPUT` parameters ni `RETURN` values para datos de negocio.
 - Las transacciones se manejan desde la capa de aplicación con `sql.Transaction` (`commit()`/`rollback()` explícitos). Los SPs también usan `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` internamente (ej. `SP_Intento_IniciarExamen`, `SP_Respuesta_GuardarOpcion`).
 - La columna `IdentificadorInstitucional` en la respuesta de login es calculada en la query de `auth.service.ts`: si el rol es `'docente'` devuelve `IdDocente`, si es `'alumno'` devuelve `IdAlumno`.
-- Todas las fechas se almacenan como `DATETIME`. La API las recibe como strings ISO 8601 (`z.string().datetime()`) y las convierte con `new Date(FechaInicio)` antes de pasarlas al SP.
+- Las fechas legacy usan `DATETIME`; auth y banco incorporan `DATETIME2`. La API recibe fechas como strings ISO 8601 (`z.string().datetime()`).
+
+## 7. Banco privado de preguntas
+
+DDL versionado en `migrations/20260908_banco_preguntas.sql`. Es aditivo, transaccional
+y requiere ejecución manual; el backend no lo aplica al arrancar. Script de lectura
+posterior: `scripts/verificar-banco-preguntas.sql`. No transforma contenido anterior.
+
+| Tabla | Relación y restricciones |
+|---|---|
+| `BancoPregunta` | Identity; FK `IdDocente → Docente.Legajo`. Título, enunciado, tipo, estado, revisión positiva y auditoría UTC. |
+| `BancoOpcion` | Identity; FK `IdPregunta → BancoPregunta.Id`. Texto, EsCorrecta y posición positiva única por pregunta. |
+| `BancoGrupo` | Identity; FK a docente. Título de referencia, estado, revisión y auditoría. |
+| `BancoGrupoPregunta` | PK `(IdGrupo,IdPregunta)`; posición única por grupo. FKs compuestas con `IdDocente` impiden mezclar propietarios. |
+| `BancoEtiqueta` | Identity; FK a docente. Nombre normalizado calculado/persistido, único por docente, sin distinguir mayúsculas ni espacios exteriores. |
+| `BancoPreguntaEtiqueta` | PK `(IdPregunta,IdEtiqueta)`; FKs compuestas con propietario. |
+| `BancoGrupoEtiqueta` | PK `(IdGrupo,IdEtiqueta)`; FKs compuestas con propietario. |
+
+Estados con CHECK: `borrador`, `disponible`, `archivado`; tipos de pregunta con CHECK:
+`mc`, `vf`, `abierta`, `code`. La disponibilidad de `code` está bloqueada en la API v1.
+Las reglas de corrección y disponibilidad de grupos se validan en el service, no
+mediante triggers. `Revision` es un contador de concurrencia, no una versión histórica.
+Auditoría nueva: `FechaCreacion` y `FechaActualizacion`, `DATETIME2(3)` con UTC.
+Las transacciones de banco utilizan SERIALIZABLE y coordinan escrituras/copias por
+fila docente; las de evaluación coordinan primero por actividad. Contención/deadlocks
+deben comprobarse con SQL Server real antes del despliegue.
+
+Índices por propietario/estado/fecha, propietario/tipo, búsqueda inversa de preguntas
+en grupos y etiquetas asociadas. La normalización utiliza `Latin1_General_100_CI_AS`:
+conserva distinción de acentos. No hay FK obligatoria a materia o carrera.
+
+Procedencia opcional en tablas del motor:
+
+- `GrupoPregunta.IdBancoGrupoOrigen → BancoGrupo.Id`.
+- `Pregunta.IdBancoPreguntaOrigen → BancoPregunta.Id`.
+- Ambas incluyen `RevisionBancoOrigen` y `FechaIncorporacionBanco` opcionales.
+- CHECK exige los tres campos nulos o los tres completos con revisión positiva.
+
+Una pregunta individual importada crea un grupo sin origen de grupo y una pregunta
+con origen de pregunta. Los registros anteriores mantienen procedencia nula. La
+procedencia no se expone como dato editable ni sincroniza el contenido. Las FKs no
+tienen cascada desde el banco al motor. Preguntas/grupos se archivan; no se eliminan
+físicamente desde la API. Eliminar una etiqueta solo elimina sus asociaciones e
+incrementa revisiones de recursos afectados.
+
+Las copias tienen IDs nuevos de grupo, pregunta y opción, por lo que los SP de
+sorteo, respuesta y corrección conservan sus relaciones actuales. `IntentoPregunta`
+continúa guardando IDs: la inmutabilidad depende de bloquear edición/reapertura de
+evaluaciones publicadas o con intentos, no de una copia adicional por intento.
+
+## 8. Revisión de actividades e idempotencia general
+
+DDL: `migrations/20260926_evaluacion_revision_idempotencia.sql`. Debe ejecutarse
+después de la migración del banco. Es aditivo, transaccional, repetible y no se aplica
+desde el proceso Node. Su verificación de solo lectura está en
+`scripts/verificar-evaluacion-idempotencia.sql`.
+
+`Actividad.Revision` comienza en 1, es obligatoria y positiva. Las operaciones de
+edición/publicación bloquean la fila con `UPDLOCK,HOLDLOCK`, comparan
+`RevisionEsperada` y actualizan el contador dentro de la misma transacción. Las
+importaciones dedicadas también incrementan la revisión y la devuelven. No es un
+historial ni permite reconstruir versiones anteriores.
+
+`OperacionIdempotente` contiene:
+
+| Campo | Uso |
+|---|---|
+| `Actor`, `Operacion`, `Clave` | Identidad lógica única; `Clave` es UUID |
+| `RequestHash` | SHA-256 hexadecimal del request canónico |
+| `Estado` | `en_progreso` o `completada` |
+| `ResultadoJson`, `StatusHttp` | IDs/mappings mínimos para replay; nunca el contenido académico completo |
+| `FechaCreacion`, `FechaActualizacion`, `FechaExpiracion` | UTC `DATETIME2(3)`; expiración a siete días |
+
+La lectura usa `UPDLOCK,HOLDLOCK` dentro de una transacción SERIALIZABLE. La constraint
+única `(Actor, Operacion, Clave)` impide duplicados entre procesos. Reserva, escritura
+de negocio y resultado se confirman o revierten juntos. Una operación completada con
+igual hash se reproduce; con otro hash se rechaza. No existe purga automática: la fecha
+de expiración habilita una futura limpieza administrada, que debe conservar al menos
+siete días y probarse por separado.
+
+La publicación completa actualiza evaluación, estructura, procedencia, banco y estado
+en una sola transacción. Las FKs de procedencia siguen siendo informativas: no hay
+sincronización ni cascada desde el banco. Al editar, los IDs anidados existentes se
+actualizan, los omitidos se eliminan y los nuevos se insertan; un origen persistido no
+puede reemplazarse por otro mediante la API.

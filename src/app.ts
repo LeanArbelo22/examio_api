@@ -18,6 +18,7 @@ import telemetriaRoutes from './routes/telemetria.routes';
 import usuariosRoutes from './routes/usuarios.routes';
 import reportesRoutes from './routes/reportes.routes';
 import healthRoutes from './routes/health.routes';
+import bancoRoutes from './routes/banco.routes';
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.json({ message: 'API Node.js Online' }));
 app.use('/api/health', healthRoutes);
+app.use('/api/banco-preguntas', bancoRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/alumnos', alumnosRoutes);
 app.use('/api/auth', authRoutes);

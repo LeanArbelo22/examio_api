@@ -179,7 +179,11 @@ describe('borradores reales', () => {
       .set('Idempotency-Key', '00000000-0000-4000-8000-000000000010')
       .send({ Titulo: 'Borrador mínimo', IdMateriaDivision: 1, Estado: 'borrador' });
     expect(res.status).toBe(201);
-    expect(res.body.data).toMatchObject({ idActividad: 50, idPublicacion: 60, estado: 'borrador', revision: 1, importaciones: [] });
+    expect(res.body.data).toMatchObject({
+      idActividad: 50, idPublicacion: 60, estado: 'borrador', revision: 1, importaciones: [],
+      escalaCalificacion: 10, notaAprobacion: 4, modoPuntaje: 'iguales',
+      mostrarPuntajePorPregunta: false, correccionAutomaticaCerradas: true,
+    });
     expect(mock.transactionRequest.input).toHaveBeenCalledWith('Intentos', expect.anything(), 1);
     expect(mock.transactionRequest.input).toHaveBeenCalledWith('Duracion', expect.anything(), 90);
   });
@@ -193,6 +197,16 @@ describe('borradores reales', () => {
         { TituloReferencia: '', Variantes: [{ Enunciado: '', Tipo: 'mc', Opciones: [] }] },
       ] });
     expect(res.status).toBe(201); expect(res.body.data.revision).toBe(1);
+  });
+
+  it('aplica umbral 40 por defecto al crear un borrador sobre escala 100', async () => {
+    prepararCreacion(false);
+    const res = await request(app).post('/api/evaluaciones/guardar-completo')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000012')
+      .send({ Titulo: 'Borrador sobre 100', IdMateriaDivision: 1, Estado: 'borrador', EscalaCalificacion: 100 });
+    expect(res.status).toBe(201);
+    expect(res.body.data).toMatchObject({ escalaCalificacion: 100, notaAprobacion: 40 });
   });
 });
 
@@ -492,6 +506,30 @@ describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
     });
     expect(res.body.data[1].idPregunta).toBe(20);
   });
+
+  it('devuelve puntajeMaximo únicamente cuando la actividad lo habilita', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
+      recordset: [{
+        IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL',
+        PuntajeMaximo: 3.34, MostrarPuntajePorPregunta: true,
+      }],
+    });
+    const visible = await request(app).get('/api/evaluaciones/intento/1/renderizar')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+    expect(visible.body.data[0]).toMatchObject({ puntajeMaximo: 3.34 });
+    expect(visible.body.data[0].mostrarPuntajePorPregunta).toBeUndefined();
+
+    (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
+      recordset: [{
+        IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL',
+        PuntajeMaximo: 3.34, MostrarPuntajePorPregunta: false,
+      }],
+    });
+    const oculto = await request(app).get('/api/evaluaciones/intento/1/renderizar')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+    expect(oculto.body.data[0].puntajeMaximo).toBeUndefined();
+  });
 });
 
 describe('GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento', () => {
@@ -528,6 +566,8 @@ describe('GET /api/evaluaciones/:id/detalle', () => {
           {
             IdActividad: 42, Titulo: 'Parcial I', Descripcion: 'SQL', Tipo: 'evaluacion',
             DuracionMinutos: 120, CantidadIntentosMaximos: 2, Estado: 'publicada',
+            EscalaCalificacion: 10, NotaAprobacion: 4, ModoPuntaje: 'iguales',
+            MostrarPuntajePorPregunta: false, CorreccionAutomaticaCerradas: true,
             RecursosPermitidos: null, IdPublicacion: 5,
             FechaInicio: new Date('2026-06-15T10:00:00Z'),
             FechaFin: new Date('2026-06-15T12:00:00Z'),
@@ -537,8 +577,8 @@ describe('GET /api/evaluaciones/:id/detalle', () => {
       })
       .mockResolvedValueOnce({
         recordset: [
-          { IdGrupo: 1, TituloReferencia: 'SQL Básico', IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 1, Texto: 'DDL', EsCorrecta: true },
-          { IdGrupo: 1, TituloReferencia: 'SQL Básico', IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 2, Texto: 'DML', EsCorrecta: false },
+          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 1, Texto: 'DDL', EsCorrecta: true },
+          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 2, Texto: 'DML', EsCorrecta: false },
         ],
       });
 
@@ -550,8 +590,10 @@ describe('GET /api/evaluaciones/:id/detalle', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.idPublicacion).toBe(5);
     expect(res.body.data.titulo).toBe('Parcial I');
+    expect(res.body.data).toMatchObject({ escalaCalificacion: 10, notaAprobacion: 4, modoPuntaje: 'iguales' });
     expect(res.body.data.grupos).toHaveLength(1);
     expect(res.body.data.grupos[0].tituloReferencia).toBe('SQL Básico');
+    expect(res.body.data.grupos[0].puntajeMaximo).toBe(10);
     expect(res.body.data.grupos[0].preguntas).toHaveLength(1);
     expect(res.body.data.grupos[0].preguntas[0].idPregunta).toBe(10);
     expect(res.body.data.grupos[0].preguntas[0].opciones).toHaveLength(2);

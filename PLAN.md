@@ -21,6 +21,130 @@ su alcance. No reemplaza los contratos de `README.md`, el modelo de
 - No registrar ni persistir tokens, contraseñas, hashes o secretos reutilizables.
 - Reflejar en README únicamente comportamiento efectivo y verificado.
 
+## Calificación configurable — etapa 1
+
+**Estado: COMPLETADA — SQL APLICADO Y VERIFICADO EN BASE DE PRUEBA**
+
+- [x] Agregar escala 10/100, umbral, modo de puntaje, visibilidad y flag de
+  corrección automática a creación, edición, publicación y detalle.
+- [x] Mantener defaults compatibles 10/4/iguales/oculto/automático.
+- [x] Materializar reparto igual exacto en centavos y validar suma personalizada.
+- [x] Ocultar el puntaje en el DTO de render del alumno cuando corresponde.
+- [x] Preparar migración única, transaccional e idempotente, sin ejecución automática.
+- [x] Ampliar notas de intentos a `DECIMAL(5,2)` sin modificar actas.
+- [x] Preparar snapshot/corrección por pregunta, auditorías, override de intento válido
+  e incidentes de foco para las etapas siguientes.
+- [x] Actualizar los SP existentes de inicio, render y finalización; sin SP nuevos.
+- [x] Agregar verificación SQL de solo lectura y cobertura Jest focalizada.
+- [x] Comparar la migración con el esquema efectivo de una base de prueba.
+- [x] Aplicar dos veces y ejecutar la verificación de solo lectura.
+- [x] Integrar en frontend el editor y render con puntaje visible/oculto.
+- [ ] Probar explícitamente rollback y correcciones concurrentes contra SQL Server real.
+
+## Calificación configurable — etapa 2
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE PRUEBA MANUAL FRONTEND/SQL REAL**
+
+- [x] Evolucionar la corrección a `puntajeObtenido` sobre `IntentoPregunta`.
+- [x] Mantener `esCorrecta` como compatibilidad temporal.
+- [x] Permitir corregir preguntas omitidas y modificar autocorrecciones.
+- [x] Auditar valor, comentario, origen y actor de cada corrección.
+- [x] Recalcular nota automática, calculada y efectiva dentro de la transacción.
+- [x] Convertir `calificar` en override final auditado, válido en escalas 10/100.
+- [x] Exponer puntajes, origen y descomposición de nota en el intento completo.
+- [x] Validar propiedad de la comisión para escrituras docentes.
+- [x] Agregar cobertura focalizada de compatibilidad, parciales, 100.00 y rollback.
+- [ ] Probar manualmente corrección parcial, pregunta omitida y modificación de una
+  autocorrección desde el frontend contra la base de prueba.
+- [ ] Probar dos correcciones concurrentes sobre el mismo intento en SQL Server real.
+
+La inconsistencia de reportes por escalas 10/100 y umbrales hardcodeados quedó resuelta
+de forma transversal en la etapa 5. Otros módulos legacy todavía pueden contener reglas
+4/6 propias; no unificarlas incidentalmente sin revisar su contrato académico.
+
+## Calificación configurable — etapa 3
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE PRUEBA MANUAL FRONTEND/SQL REAL**
+
+- [x] Resolver automáticamente el último intento `entregado` con desempate estable por
+  fecha de finalización, número e ID.
+- [x] Excluir `en_progreso`, `vencido` y `anulado` de la selección automática.
+- [x] Exponer un resumen seguro de todos los intentos por alumno/publicación.
+- [x] Permitir selección manual persistente, auditada, reversible e idempotente.
+- [x] Mantener el override manual frente a entregas posteriores.
+- [x] Validar candidato, publicación, alumno y propiedad docente dentro de transacción.
+- [x] Permitir al alumno consultar únicamente sus propios resúmenes, sin respuestas.
+- [x] Cerrar el acceso al detalle completo de intentos para docentes ajenos a la comisión.
+- [x] Agregar cobertura focalizada para selección, desempates, RBAC, auditoría y rollback.
+- [ ] Probar manualmente alta, reemplazo y eliminación del override desde el frontend.
+- [ ] Probar dos selecciones concurrentes contra SQL Server real.
+
+La etapa reutiliza `IntentoValidoOverride` e `HistorialIntentoValidoOverride`, ya creadas
+por `20261011_calificacion_intentos_telemetria.sql`; no requiere otra migración.
+
+## Calificación configurable — etapa 4
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE PRUEBA MANUAL FRONTEND/SQL REAL**
+
+- [x] Agregar `GET /api/intentos/mios`, exclusivo de alumno e identificado por JWT.
+- [x] Mantener los endpoints históricos con matrícula por compatibilidad.
+- [x] Validar filtros de materia, comisión, fechas, estado, resultado, paginación y orden.
+- [x] Combinar filtros con semántica AND y ordenar con desempate estable por ID.
+- [x] Calcular resultado con `Actividad.NotaAprobacion`, preservando escalas 10/100.
+- [x] Resolver intento válido antes de filtrar y respetar el override manual.
+- [x] Calcular resumen sobre todo el resultado filtrado, independiente de la página.
+- [x] Omitir respuestas, opciones y contenido completo del examen.
+- [x] Reutilizar tablas actuales sin migración ni Stored Procedures nuevos.
+- [x] Agregar cobertura focalizada de identidad, filtros, fechas, orden, resumen y RBAC.
+- [ ] Probar filtros combinados y paginación desde el frontend contra SQL Server real.
+- [ ] Verificar el plan de ejecución con un volumen representativo de intentos.
+
+## Calificación configurable — etapa 5
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE PRUEBA MANUAL FRONTEND/SQL REAL**
+
+- [x] Aplicar `Actividad.NotaAprobacion` en ambos endpoints de reportes.
+- [x] Normalizar a base 10 los promedios que combinan actividades de escalas 10/100.
+- [x] Preservar escala, umbral y promedio original en filas de una evaluación.
+- [x] Incorporar `alcanceIntentos=todos|validos`, con `todos` como default compatible.
+- [x] Separar conteos operativos de métricas académicas.
+- [x] Respetar override manual y selección automática estable en alcance `validos`.
+- [x] Filtrar evaluaciones mediante `conPendientesCorreccion=true|false` antes de KPIs
+  y paginación.
+- [x] Mantener RBAC docente y calcular agregados sobre todo el conjunto filtrado.
+- [x] Agregar cobertura focalizada para umbral, escalas, alcance, override y pendientes.
+- [ ] Probar manualmente ambos reportes con datos mixtos 10/100 en el frontend.
+- [ ] Ejecutar las consultas contra SQL Server real con varios intentos y overrides.
+- [ ] Verificar planes de ejecución con un volumen representativo.
+
+La etapa reutiliza la migración ya aplicada
+`20261011_calificacion_intentos_telemetria.sql`; no requiere otro script SQL.
+
+## Calificación configurable — etapa 6
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE PRUEBA MANUAL FRONTEND/SQL REAL**
+
+- [x] Agregar `PUT /api/telemetria/intentos/:idIntento/incidentes/:eventoId`.
+- [x] Admitir inicio y cierre separados o juntos, con replay idempotente por UUID.
+- [x] Rechazar reutilización incompatible del UUID sin duplicar ni sobrescribir datos.
+- [x] Validar titularidad del intento desde el alumno del JWT.
+- [x] Registrar timestamps cliente y recepción server-side sin consecuencias automáticas.
+- [x] Documentar tolerancia de reloj de cinco minutos y sincronización tardía de siete días.
+- [x] Agregar resumen y listado para docente propietario/administrador.
+- [x] Calcular cantidad, suma, promedio y máximo de pérdidas de foco.
+- [x] Mantener los endpoints legacy de `AlertaFraude` y navegación.
+- [x] Reutilizar `IncidenteIntento` sin migración ni Stored Procedures nuevos.
+- [x] Cubrir inicio, cierre, idempotencia, conflicto, duración, RBAC, alcance y agregados.
+- [ ] Probar ciclo offline/reintento desde el frontend contra SQL Server real.
+- [ ] Probar escrituras concurrentes del mismo UUID contra la constraint real.
+- [ ] Verificar planes de ejecución y volumen de incidentes por intento.
+
+La etapa reutiliza la migración ya aplicada
+`20261011_calificacion_intentos_telemetria.sql`; no requiere otro script SQL.
+
+**Siguiente trabajo funcional:** definir con producto la política de revisión del examen
+por alumno. Continúan fuera de alcance las consecuencias automáticas por telemetría.
+
 ---
 
 ## Fase 0 — Access y refresh tokens server-side
@@ -342,7 +466,7 @@ evaluaciones, además del detalle por publicación. No implementado en esta entr
 
 ### Evidencia de validación local
 
-- Suite completa final: **16 suites / 337 pruebas aprobadas**, también con
+- Suite completa actual: **21 suites / 407 pruebas aprobadas**, también con
   `--runInBand --detectOpenHandles`; Jest finaliza naturalmente sin `--forceExit`.
 - Suite del banco: **62 pruebas aprobadas**; incluye integración HTTP de copias
   durante creación/edición, rollback, conflictos y aislamiento.

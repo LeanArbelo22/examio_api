@@ -2,6 +2,17 @@ import { Request, Response } from 'express';
 import { pool } from '../config/db';
 import * as sql from 'mssql';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
+import { ActorBanco, BancoError } from '../services/banco-common.service';
+import { responderErrorBanco } from './banco.controller';
+import { asignarNotaFinalManual, corregirPreguntaIntento } from '../services/intento-correccion.service';
+import { MisIntentosQuerySchema } from '../schemas/intento.schema';
+import { obtenerMisIntentos } from '../services/intento-historial.service';
+
+const idPositivo = (value: string, nombre: string): number => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new BancoError(400, `${nombre} inválido`, 'REQUEST_INVALID');
+  return parsed;
+};
 
 export const iniciarExamen = async (req: Request, res: Response) => {
   try {
@@ -115,6 +126,18 @@ export const getHistorialPorAlumno = async (req: Request, res: Response) => {
   }
 };
 
+export const getMisIntentos = async (req: Request, res: Response) => {
+  try {
+    const actor = (req as any).user;
+    if (!Number.isInteger(actor.idAlumno) || actor.idAlumno <= 0) {
+      throw new BancoError(403, 'El usuario no tiene un alumno asociado', 'ATTEMPT_SCOPE_FORBIDDEN');
+    }
+    const filters = MisIntentosQuerySchema.parse(req.query);
+    const data = await obtenerMisIntentos(actor.idAlumno, filters);
+    res.json({ success: true, data });
+  } catch (error) { responderErrorBanco(res, error); }
+};
+
 export const getIntentosDetallados = async (req: Request, res: Response) => {
   try {
     const { idAlumno } = req.params;
@@ -182,15 +205,19 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       .input('IdIntento', sql.Int, idIntento)
       .query(`
         SELECT I.Id AS IdIntento, I.IdAlumno, I.IdPublicacion, I.Estado,
-               I.NotaFinal, I.NotaAutomatica, I.FechaInicio, I.FechaFin,
+               I.NotaFinal, I.NotaAutomatica, I.NotaFinalCalculada, I.NotaFinalManual,
+               I.FechaInicio, I.FechaFin,
                I.NumeroIntento,
                AL.Nombre, AL.Apellido, AL.Correo,
                A.Titulo AS TituloEvaluacion, A.Tipo AS TipoEvaluacion,
-               A.DuracionMinutos
+               A.DuracionMinutos, A.EscalaCalificacion, A.NotaAprobacion,
+               MD.IdDocente, D.Estado AS DocenteActivo
         FROM Intento I
         INNER JOIN Alumno AL ON I.IdAlumno = AL.Matricula
         INNER JOIN Publicacion P ON I.IdPublicacion = P.Id
         INNER JOIN Actividad A ON P.IdActividad = A.Id
+        INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
+        LEFT JOIN Docente D ON MD.IdDocente = D.Legajo
         WHERE I.Id = @IdIntento
       `);
 
@@ -200,10 +227,20 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
 
     const intento = headerResult.recordset[0];
 
-    if ((req as any).user.role === 'alumno' && intento.IdAlumno !== (req as any).user.idAlumno) {
+    const actor = (req as any).user;
+    if (actor.role === 'alumno' && intento.IdAlumno !== actor.idAlumno) {
       return res.status(403).json({
         success: false,
         message: 'Acceso denegado. No tienes permisos para ver la radiografía de este intento.',
+      });
+    }
+    if (actor.role === 'docente' && (
+      !actor.idDocente || intento.IdDocente !== actor.idDocente || !intento.DocenteActivo
+    )) {
+      return res.status(403).json({
+        success: false,
+        message: 'El intento no pertenece a una comisión del docente',
+        code: 'ATTEMPT_SCOPE_FORBIDDEN',
       });
     }
 
@@ -212,6 +249,9 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       .query(`
         SELECT PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,
                GP.TituloReferencia AS GrupoConceptualmente,
+               IP.PuntajeMaximoSnapshot, IP.PuntajeObtenido, IP.OrigenCorreccion,
+               IP.ComentariosDocente AS ComentariosCorreccion,
+               IP.CorregidoPor, IP.FechaCorreccion,
                O.Id AS IdOpcion, O.Texto AS OpcionTexto, O.EsCorrecta,
                R.Id AS IdRespuesta, R.RtaTexto, R.EsCorrecta AS RespuestaEsCorrecta, R.ComentariosDocente,
                CASE WHEN RO.IdOpcion IS NOT NULL THEN 1 ELSE 0 END AS FueSeleccionada
@@ -234,6 +274,12 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
           enunciado: row.Enunciado,
           tipo: row.Tipo,
           grupoConceptualmente: row.GrupoConceptualmente,
+          puntajeMaximo: row.PuntajeMaximoSnapshot,
+          puntajeObtenido: row.PuntajeObtenido,
+          origenCorreccion: row.OrigenCorreccion,
+          comentariosDocente: row.ComentariosCorreccion,
+          corregidoPor: row.CorregidoPor,
+          fechaCorreccion: row.FechaCorreccion,
           respuesta: null,
           opciones: [],
         };
@@ -258,10 +304,13 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       }
     }
 
+    const header = mapKeysToCamelCase(headerResult.recordset[0]) as Record<string, unknown>;
+    delete header.idDocente;
+    delete header.docenteActivo;
     res.json({
       success: true,
       data: {
-        ...mapKeysToCamelCase(headerResult.recordset[0]),
+        ...header,
         preguntas: Object.values(preguntasMap),
       },
     });
@@ -275,71 +324,27 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
 
 export const calificarIntento = async (req: Request, res: Response) => {
   try {
-    const { idIntento } = req.params;
+    const idIntento = idPositivo(req.params.idIntento, 'idIntento');
     const { notaFinal } = req.body;
-
-    const check = await pool.request()
-      .input('Id', sql.Int, idIntento)
-      .query('SELECT Id, Estado FROM Intento WHERE Id = @Id');
-
-    if (check.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Intento no encontrado' });
-    }
-
-    if (check.recordset[0].Estado === 'en_progreso') {
-      return res.status(400).json({
-        success: false,
-        message: 'No se puede calificar un examen que aún está en progreso.',
-      });
-    }
-
-    await pool.request()
-      .input('Id', sql.Int, idIntento)
-      .input('NotaFinal', sql.Decimal(4, 2), notaFinal)
-      .query('UPDATE Intento SET NotaFinal = @NotaFinal WHERE Id = @Id');
-
-    res.json({ success: true, message: 'Nota asignada correctamente' });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+    const data = await asignarNotaFinalManual(
+      (req as Request & { user: ActorBanco }).user,
+      idIntento,
+      notaFinal,
+    );
+    res.json({ success: true, message: 'Nota asignada correctamente', data: mapKeysToCamelCase(data) });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const corregirRespuesta = async (req: Request, res: Response) => {
   try {
-    const { idIntento, idPregunta } = req.params;
-    const { esCorrecta, comentariosDocente } = req.body;
-
-    const intento = await pool.request()
-      .input('IdIntento', sql.Int, idIntento)
-      .query('SELECT Estado FROM Intento WHERE Id = @IdIntento');
-
-    if (intento.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Intento no encontrado' });
-    }
-
-    if (intento.recordset[0].Estado === 'en_progreso') {
-      return res.status(400).json({ success: false, message: 'No se puede corregir un examen en progreso' });
-    }
-
-    const result = await pool.request()
-      .input('IdIntento', sql.Int, idIntento)
-      .input('IdPregunta', sql.Int, idPregunta)
-      .input('EsCorrecta', sql.Bit, esCorrecta ?? null)
-      .input('ComentariosDocente', sql.NVarChar, comentariosDocente ?? null)
-      .query(`
-        UPDATE Respuesta 
-        SET EsCorrecta = @EsCorrecta, ComentariosDocente = @ComentariosDocente
-        WHERE IdIntento = @IdIntento AND IdPregunta = @IdPregunta
-      `);
-
-    if (result.rowsAffected[0] === 0) {
-      return res.status(404).json({ success: false, message: 'Respuesta no encontrada' });
-    }
-
-    res.json({ success: true, message: 'Respuesta corregida correctamente' });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+    const idIntento = idPositivo(req.params.idIntento, 'idIntento');
+    const idPregunta = idPositivo(req.params.idPregunta, 'idPregunta');
+    const data = await corregirPreguntaIntento(
+      (req as Request & { user: ActorBanco }).user,
+      idIntento,
+      idPregunta,
+      req.body,
+    );
+    res.json({ success: true, message: 'Respuesta corregida correctamente', data: mapKeysToCamelCase(data) });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };

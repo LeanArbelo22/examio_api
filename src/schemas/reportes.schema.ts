@@ -1,23 +1,18 @@
 import { z } from 'zod';
+import { isIsoDate } from '../utils/isoDate';
 
 const optionalPositiveInteger = z.preprocess(
   (value) => value === undefined ? undefined : Number(value),
   z.number().int().positive().optional(),
 );
 
-const isIsoDate = (value: string): boolean => {
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (dateOnly) {
-    const [, year, month, day] = dateOnly;
-    const parsed = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-    return parsed.toISOString().slice(0, 10) === value;
-  }
-
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-    return false;
-  }
-  return !Number.isNaN(Date.parse(value));
-};
+const optionalBoolean = z.preprocess(
+  value => value === undefined ? undefined
+    : value === 'true' ? true
+      : value === 'false' ? false
+        : value,
+  z.boolean().optional(),
+);
 
 export const RendimientoEvaluacionesQuerySchema = z.object({
   idMateria: optionalPositiveInteger,
@@ -27,6 +22,8 @@ export const RendimientoEvaluacionesQuerySchema = z.object({
   estado: z.enum(['borrador', 'publicada', 'archivada']).optional(),
   fechaDesde: z.string().refine(isIsoDate, 'fechaDesde debe ser una fecha ISO 8601 válida').optional(),
   fechaHasta: z.string().refine(isIsoDate, 'fechaHasta debe ser una fecha ISO 8601 válida').optional(),
+  alcanceIntentos: z.enum(['todos', 'validos']).default('todos'),
+  conPendientesCorreccion: optionalBoolean,
   pagina: z.preprocess(
     (value) => value === undefined ? 1 : Number(value),
     z.number().int().positive(),

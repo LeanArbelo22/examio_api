@@ -3,8 +3,6 @@ import { pool } from '../config/db';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
 import { RendimientoEvaluacionesQuery } from '../schemas/reportes.schema';
 
-const NOTA_MINIMA_APROBACION = 6;
-
 const identifierFilters = [
   ['idMateria', 'MD.IdMateria = @IdMateria'],
   ['idMateriaDivision', 'MD.Id = @IdMateriaDivision'],
@@ -63,7 +61,6 @@ export const getRendimientoEvaluacionesReport = async (
   idDocente: number | null,
 ) => {
   const request = bindFilters(pool.request(), filters)
-    .input('NotaMinimaAprobacion', sql.Decimal(4, 2), NOTA_MINIMA_APROBACION)
     .input('Offset', sql.Int, (filters.pagina - 1) * filters.limite)
     .input('Limit', sql.Int, filters.limite);
   if (idDocente !== null) request.input('IdDocente', sql.Int, idDocente);
@@ -74,6 +71,25 @@ export const getRendimientoEvaluacionesReport = async (
   const dateToClause = filters.fechaHasta ? 'AND P.FechaInicio <= @FechaHasta' : '';
   const orderBy = orderingMap[filters.ordenarPor];
   const direction = filters.ordenDireccion === 'asc' ? 'ASC' : 'DESC';
+  const validSelectionJoins = filters.alcanceIntentos === 'validos' ? `
+    LEFT JOIN IntentoValidoOverride IVO
+      ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
+    OUTER APPLY (
+      SELECT COALESCE(IVO.IdIntento,(
+        SELECT TOP 1 IV.Id FROM Intento IV
+        WHERE IV.IdPublicacion=I.IdPublicacion AND IV.IdAlumno=I.IdAlumno
+          AND IV.Estado='entregado'
+        ORDER BY IV.FechaFin DESC,IV.NumeroIntento DESC,IV.Id DESC
+      )) AS IdIntentoValido
+    ) IVS` : '';
+  const academicScope = filters.alcanceIntentos === 'validos'
+    ? 'AND I.Id=IVS.IdIntentoValido'
+    : '';
+  const pendingFilter = filters.conPendientesCorreccion === true
+    ? 'DELETE FROM #ReporteEvaluaciones WHERE IntentosPendientesCorreccion=0;'
+    : filters.conPendientesCorreccion === false
+      ? 'DELETE FROM #ReporteEvaluaciones WHERE IntentosPendientesCorreccion>0;'
+      : '';
 
   const result = await request.query(`
     SET NOCOUNT ON;
@@ -88,7 +104,9 @@ export const getRendimientoEvaluacionesReport = async (
       D.Descripcion AS Division,
       P.FechaInicio,
       P.FechaFin,
-      A.Estado
+      A.Estado,
+      A.EscalaCalificacion,
+      A.NotaAprobacion
     INTO #PublicacionesAlcanzadas
     FROM Publicacion P
     INNER JOIN Actividad A ON A.Id = P.IdActividad
@@ -118,14 +136,20 @@ export const getRendimientoEvaluacionesReport = async (
       SUM(CASE WHEN I.Estado = 'en_progreso' THEN 1 ELSE 0 END) AS EnProgreso,
       SUM(CASE WHEN I.Estado = 'vencido' THEN 1 ELSE 0 END) AS Vencidos,
       SUM(CASE WHEN I.Estado = 'anulado' THEN 1 ELSE 0 END) AS Anulados,
-      SUM(CASE WHEN I.Estado = 'entregado' AND I.NotaFinal IS NOT NULL THEN 1 ELSE 0 END) AS IntentosCalificados,
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} THEN 1 ELSE 0 END) AS IntentosAlcanceAcademico,
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} AND I.NotaFinal IS NOT NULL THEN 1 ELSE 0 END) AS IntentosCalificados,
       SUM(CASE WHEN I.Estado = 'entregado' AND I.NotaFinal IS NULL THEN 1 ELSE 0 END) AS IntentosPendientesCorreccion,
-      SUM(CASE WHEN I.Estado = 'entregado' AND I.NotaFinal >= @NotaMinimaAprobacion THEN 1 ELSE 0 END) AS IntentosAprobados,
-      SUM(CASE WHEN I.Estado = 'entregado' AND I.NotaFinal < @NotaMinimaAprobacion THEN 1 ELSE 0 END) AS IntentosDesaprobados,
-      SUM(CASE WHEN I.Estado = 'entregado' AND I.NotaFinal IS NOT NULL THEN CAST(I.NotaFinal AS DECIMAL(18,4)) ELSE 0 END) AS SumaNotasCalificadas
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} AND I.NotaFinal >= PA.NotaAprobacion THEN 1 ELSE 0 END) AS IntentosAprobados,
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} AND I.NotaFinal < PA.NotaAprobacion THEN 1 ELSE 0 END) AS IntentosDesaprobados,
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} AND I.NotaFinal IS NOT NULL
+        THEN CAST(I.NotaFinal AS DECIMAL(18,4)) ELSE 0 END) AS SumaNotasCalificadas,
+      SUM(CASE WHEN I.Estado = 'entregado' ${academicScope} AND I.NotaFinal IS NOT NULL
+        THEN CAST(I.NotaFinal*10.0/NULLIF(PA.EscalaCalificacion,0) AS DECIMAL(18,4)) ELSE 0 END)
+        AS SumaNotasNormalizadasBase10
     INTO #Intentos
     FROM #PublicacionesAlcanzadas PA
     LEFT JOIN Intento I ON I.IdPublicacion = PA.IdPublicacion
+    ${validSelectionJoins}
     GROUP BY PA.IdPublicacion;
 
     SELECT
@@ -137,15 +161,21 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(IT.EnProgreso, 0) AS EnProgreso,
       COALESCE(IT.Vencidos, 0) AS Vencidos,
       COALESCE(IT.Anulados, 0) AS Anulados,
+      COALESCE(IT.IntentosAlcanceAcademico, 0) AS IntentosAlcanceAcademico,
       COALESCE(IT.IntentosCalificados, 0) AS IntentosCalificados,
       COALESCE(IT.IntentosPendientesCorreccion, 0) AS IntentosPendientesCorreccion,
       COALESCE(IT.IntentosAprobados, 0) AS IntentosAprobados,
       COALESCE(IT.IntentosDesaprobados, 0) AS IntentosDesaprobados,
       COALESCE(IT.SumaNotasCalificadas, 0) AS SumaNotasCalificadas,
+      COALESCE(IT.SumaNotasNormalizadasBase10, 0) AS SumaNotasNormalizadasBase10,
       CASE WHEN COALESCE(IT.IntentosCalificados, 0) > 0
         THEN ROUND(IT.SumaNotasCalificadas / IT.IntentosCalificados, 2)
         ELSE NULL
       END AS PromedioIntentosCalificados,
+      CASE WHEN COALESCE(IT.IntentosCalificados, 0) > 0
+        THEN ROUND(IT.SumaNotasNormalizadasBase10 / IT.IntentosCalificados, 2)
+        ELSE NULL
+      END AS PromedioIntentosCalificadosBase10,
       CASE WHEN COALESCE(IT.IntentosCalificados, 0) > 0
         THEN ROUND(CAST(IT.IntentosAprobados AS FLOAT) / IT.IntentosCalificados * 100, 1)
         ELSE NULL
@@ -155,25 +185,32 @@ export const getRendimientoEvaluacionesReport = async (
     LEFT JOIN #Padrones PD ON PD.IdPublicacion = PA.IdPublicacion
     LEFT JOIN #Intentos IT ON IT.IdPublicacion = PA.IdPublicacion;
 
+    ${pendingFilter}
+
     SELECT
       COUNT(*) AS TotalEvaluaciones,
       COALESCE(SUM(AlumnosAlcanzados), 0) AS TotalAlumnosAlcanzados,
       (
         SELECT COUNT(DISTINCT IM.IdAlumno)
-        FROM #PublicacionesAlcanzadas PU
-        INNER JOIN InscripcionMateria IM ON IM.IdMateriaDivision = PU.IdMateriaDivision
+        FROM #ReporteEvaluaciones RE
+        INNER JOIN InscripcionMateria IM ON IM.IdMateriaDivision = RE.IdMateriaDivision
       ) AS TotalAlumnosUnicos,
       COALESCE(SUM(IntentosTotales), 0) AS TotalIntentos,
       COALESCE(SUM(Entregados), 0) AS TotalEntregados,
       COALESCE(SUM(EnProgreso), 0) AS TotalEnProgreso,
       COALESCE(SUM(Vencidos), 0) AS TotalVencidos,
       COALESCE(SUM(Anulados), 0) AS TotalAnulados,
+      COALESCE(SUM(IntentosAlcanceAcademico), 0) AS TotalIntentosAlcanceAcademico,
       COALESCE(SUM(IntentosCalificados), 0) AS TotalIntentosCalificados,
       COALESCE(SUM(IntentosPendientesCorreccion), 0) AS IntentosPendientesCorreccion,
       CASE WHEN COALESCE(SUM(IntentosCalificados), 0) > 0
-        THEN ROUND(SUM(SumaNotasCalificadas) / SUM(IntentosCalificados), 2)
+        THEN ROUND(SUM(SumaNotasNormalizadasBase10) / SUM(IntentosCalificados), 2)
         ELSE NULL
       END AS PromedioIntentosCalificados,
+      CASE WHEN COALESCE(SUM(IntentosCalificados), 0) > 0
+        THEN ROUND(SUM(SumaNotasNormalizadasBase10) / SUM(IntentosCalificados), 2)
+        ELSE NULL
+      END AS PromedioIntentosCalificadosBase10,
       CASE WHEN COALESCE(SUM(IntentosCalificados), 0) > 0
         THEN ROUND(CAST(SUM(IntentosAprobados) AS FLOAT) / SUM(IntentosCalificados) * 100, 1)
         ELSE NULL
@@ -203,6 +240,8 @@ export const getRendimientoEvaluacionesReport = async (
       FechaInicio,
       FechaFin,
       Estado,
+      EscalaCalificacion,
+      NotaAprobacion,
       AlumnosAlcanzados,
       AlumnosQueIniciaron,
       CASE WHEN AlumnosAlcanzados > AlumnosQueIniciaron
@@ -214,9 +253,11 @@ export const getRendimientoEvaluacionesReport = async (
       EnProgreso,
       Vencidos,
       Anulados,
+      IntentosAlcanceAcademico,
       IntentosCalificados,
       IntentosPendientesCorreccion,
       PromedioIntentosCalificados,
+      PromedioIntentosCalificadosBase10,
       IntentosAprobados,
       IntentosDesaprobados,
       PorcentajeAprobacionIntentos
@@ -234,6 +275,11 @@ export const getRendimientoEvaluacionesReport = async (
   const evaluaciones = mapKeysToCamelCase(evaluationRows);
 
   return {
+    criterios: {
+      alcanceIntentos: filters.alcanceIntentos,
+      escalaPromedio: 10,
+      conPendientesCorreccion: filters.conPendientesCorreccion ?? null,
+    },
     kpis,
     graficos: { distribucionResultados },
     evaluaciones,

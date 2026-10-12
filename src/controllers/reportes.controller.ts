@@ -8,6 +8,22 @@ import {
   isEvaluationReportScopeAllowed,
 } from '../services/reportes-evaluaciones.service';
 
+const INTENTO_VALIDO_APPLY = `
+  LEFT JOIN IntentoValidoOverride IVO
+    ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
+  OUTER APPLY (
+    SELECT COALESCE(IVO.IdIntento,(
+      SELECT TOP 1 IV.Id FROM Intento IV
+      WHERE IV.IdPublicacion=I.IdPublicacion AND IV.IdAlumno=I.IdAlumno
+        AND IV.Estado='entregado'
+      ORDER BY IV.FechaFin DESC,IV.NumeroIntento DESC,IV.Id DESC
+    )) AS IdIntentoValido
+  ) IVS`;
+
+const alcanceAcademico = (alcance: string): string => alcance === 'validos'
+  ? "I.Id IS NOT NULL AND I.Estado='entregado' AND I.Id=IVS.IdIntentoValido"
+  : "I.Id IS NOT NULL AND I.Estado='entregado'";
+
 export const getRendimientoEvaluaciones = async (req: Request, res: Response) => {
   const parsed = RendimientoEvaluacionesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -76,6 +92,9 @@ export const getRendimiento = async (req: Request, res: Response) => {
     const ordenDireccion = typeof req.query.ordenDireccion === 'string' ? req.query.ordenDireccion : 'asc';
     const pagina = req.query.pagina ? Number(req.query.pagina) : 1;
     const limite = req.query.limite ? Number(req.query.limite) : 20;
+    const alcanceIntentos = typeof req.query.alcanceIntentos === 'string'
+      ? req.query.alcanceIntentos
+      : 'todos';
 
     if (matricula !== null && (isNaN(matricula) || matricula <= 0)) {
       return res.status(400).json({ success: false, message: 'matricula debe ser un número positivo' });
@@ -89,8 +108,8 @@ export const getRendimiento = async (req: Request, res: Response) => {
     if (idActividad !== null && (isNaN(idActividad) || idActividad <= 0)) {
       return res.status(400).json({ success: false, message: 'idActividad debe ser un número positivo' });
     }
-    if (estado !== null && !['entregado', 'en_progreso', 'vencido'].includes(estado)) {
-      return res.status(400).json({ success: false, message: 'estado debe ser entregado, en_progreso o vencido' });
+    if (estado !== null && !['entregado', 'en_progreso', 'vencido', 'anulado'].includes(estado)) {
+      return res.status(400).json({ success: false, message: 'estado debe ser entregado, en_progreso, vencido o anulado' });
     }
     if (fechaDesde && fechaHasta && new Date(fechaDesde) > new Date(fechaHasta)) {
       return res.status(400).json({ success: false, message: 'fechaDesde no puede ser mayor que fechaHasta' });
@@ -110,16 +129,19 @@ export const getRendimiento = async (req: Request, res: Response) => {
     if (!['asc', 'desc'].includes(ordenDireccion)) {
       return res.status(400).json({ success: false, message: 'ordenDireccion debe ser asc o desc' });
     }
+    if (!['todos', 'validos'].includes(alcanceIntentos)) {
+      return res.status(400).json({ success: false, message: 'alcanceIntentos debe ser todos o validos' });
+    }
 
     if (matricula !== null) {
       return await getRendimientoAlumno(res, matricula, idDocente, {
-        idMateria, idMateriaDivision, idActividad, estado, fechaDesde, fechaHasta,
+        idMateria, idMateriaDivision, idActividad, estado, fechaDesde, fechaHasta, alcanceIntentos,
       });
     }
 
     return await getRendimientoListado(res, idDocente, {
       idMateria, idMateriaDivision, estado, fechaDesde, fechaHasta,
-      promedioMin, promedioMax, ordenarPor, ordenDireccion, pagina, limite,
+      promedioMin, promedioMax, ordenarPor, ordenDireccion, pagina, limite, alcanceIntentos,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error desconocido';
@@ -138,6 +160,7 @@ async function getRendimientoAlumno(
     estado: string | null;
     fechaDesde: string | null;
     fechaHasta: string | null;
+    alcanceIntentos: string;
   },
 ) {
   const alumnoResult = await pool.request()
@@ -176,28 +199,36 @@ async function getRendimientoAlumno(
   if (filters.fechaDesde) request.input('FechaDesde', sql.DateTime, new Date(filters.fechaDesde));
   if (filters.fechaHasta) request.input('FechaHasta', sql.DateTime, new Date(filters.fechaHasta));
 
-  const filterClause = buildFilterClause(idDocente, filters);
+  const filterClause = buildFilterClause(idDocente, filters, false);
+  const detailFilterClause = buildFilterClause(idDocente, filters, true);
+  const academicCondition = alcanceAcademico(filters.alcanceIntentos);
 
   const kpiQuery = `
     SELECT
       COUNT(*) AS TotalIntentos,
-      COUNT(CASE WHEN I.NotaFinal IS NOT NULL THEN 1 END) AS TotalCorregidos,
-      ISNULL(AVG(CAST(I.NotaFinal AS DECIMAL(10,2))), 0) AS PromedioGeneral,
-      SUM(CASE WHEN I.NotaFinal >= 6 THEN 1 ELSE 0 END) AS Aprobados,
-      SUM(CASE WHEN I.NotaFinal < 6 AND I.NotaFinal IS NOT NULL THEN 1 ELSE 0 END) AS Desaprobados
+      COUNT(CASE WHEN ${academicCondition} THEN 1 END) AS IntentosAlcanceAcademico,
+      COUNT(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN 1 END) AS TotalCorregidos,
+      ISNULL(AVG(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL
+        THEN CAST(I.NotaFinal*10.0/NULLIF(A.EscalaCalificacion,0) AS DECIMAL(10,4)) END),0) AS PromedioGeneral,
+      SUM(CASE WHEN ${academicCondition} AND I.NotaFinal>=A.NotaAprobacion THEN 1 ELSE 0 END) AS Aprobados,
+      SUM(CASE WHEN ${academicCondition} AND I.NotaFinal<A.NotaAprobacion THEN 1 ELSE 0 END) AS Desaprobados
     FROM Intento I
     INNER JOIN Publicacion P ON I.IdPublicacion = P.Id
     INNER JOIN Actividad A ON P.IdActividad = A.Id
     INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
     INNER JOIN Materia M ON MD.IdMateria = M.Id
+    ${INTENTO_VALIDO_APPLY}
     WHERE I.IdAlumno = @Matricula ${filterClause}
   `;
 
   const detailQuery = `
     SELECT
       A.Id AS IdActividad,
+      I.IdPublicacion,
       A.Titulo,
       A.Tipo,
+      A.EscalaCalificacion,
+      A.NotaAprobacion,
       M.Nombre AS Materia,
       Dv.Descripcion AS Division,
       I.Id AS IdIntento,
@@ -206,14 +237,19 @@ async function getRendimientoAlumno(
       I.NotaAutomatica,
       I.Estado AS EstadoIntento,
       I.FechaInicio,
-      I.FechaFin
+      I.FechaFin,
+      CAST(CASE WHEN I.Estado='entregado' AND I.Id=IVS.IdIntentoValido THEN 1 ELSE 0 END AS bit) AS EsIntentoValido,
+      CASE WHEN I.Estado='entregado' AND I.Id=IVS.IdIntentoValido
+        THEN CASE WHEN IVO.IdIntento IS NULL THEN 'automatica' ELSE 'manual' END
+        ELSE NULL END AS SeleccionIntentoValido
     FROM Intento I
     INNER JOIN Publicacion P ON I.IdPublicacion = P.Id
     INNER JOIN Actividad A ON P.IdActividad = A.Id
     INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
     INNER JOIN Materia M ON MD.IdMateria = M.Id
     INNER JOIN Division Dv ON MD.IdDivision = Dv.Id
-    WHERE I.IdAlumno = @Matricula ${filterClause}
+    ${INTENTO_VALIDO_APPLY}
+    WHERE I.IdAlumno = @Matricula ${detailFilterClause}
     ORDER BY A.Id, I.NumeroIntento
   `;
 
@@ -223,6 +259,8 @@ async function getRendimientoAlumno(
   ]);
 
   const kpis = mapKeysToCamelCase(kpiResult.recordset[0] || {}) as any;
+  kpis.escalaPromedio = 10;
+  kpis.alcanceIntentos = filters.alcanceIntentos;
   kpis.porcentajeAprobacion = kpis.totalCorregidos > 0
     ? Math.round((kpis.aprobados / kpis.totalCorregidos) * 1000) / 10
     : 0;
@@ -237,6 +275,8 @@ async function getRendimientoAlumno(
         idActividad: id,
         titulo: row.Titulo,
         tipo: row.Tipo,
+        escalaCalificacion: row.EscalaCalificacion,
+        notaAprobacion: row.NotaAprobacion,
         materia: row.Materia,
         division: row.Division,
         detalleIntentos: [],
@@ -245,11 +285,15 @@ async function getRendimientoAlumno(
     const entry = actividadMap.get(id);
     entry.detalleIntentos.push({
       numeroIntento: row.NumeroIntento,
+      idIntento: row.IdIntento,
+      idPublicacion: row.IdPublicacion,
       notaFinal: row.NotaFinal,
       notaAutomatica: row.NotaAutomatica,
       estado: row.EstadoIntento,
       fechaInicio: row.FechaInicio,
       fechaFin: row.FechaFin,
+      esIntentoValido: Boolean(row.EsIntentoValido),
+      seleccionIntentoValido: row.SeleccionIntentoValido,
     });
   }
 
@@ -272,6 +316,8 @@ async function getRendimientoAlumno(
       notaFinal: mejor.notaFinal,
       notaAutomatica: mejor.notaAutomatica,
       fechaFin: mejor.fechaFin,
+      esIntentoValido: mejor.esIntentoValido,
+      seleccionIntentoValido: mejor.seleccionIntentoValido,
     } : null;
 
     delete act.detalleIntentos;
@@ -299,6 +345,7 @@ async function getRendimientoListado(
     ordenDireccion: string;
     pagina: number;
     limite: number;
+    alcanceIntentos: string;
   },
 ) {
   const request = pool.request();
@@ -315,6 +362,7 @@ async function getRendimientoListado(
   const scopeWhere = idDocente ? 'AND MD.IdDocente = @IdDocente' : '';
   const materiaWhere = params.idMateria ? 'AND MD.IdMateria = @IdMateria' : '';
   const divisionWhere = params.idMateriaDivision ? 'AND MD.Id = @IdMateriaDivision' : '';
+  const academicCondition = alcanceAcademico(params.alcanceIntentos);
 
   let intentoJoinExtra = '';
   if (params.estado) intentoJoinExtra += ' AND I.Estado = @Estado';
@@ -327,6 +375,8 @@ async function getRendimientoListado(
     INNER JOIN MateriaDivision MD ON IM.IdMateriaDivision = MD.Id
     LEFT JOIN Publicacion P ON P.IdMateriaDivision = MD.Id
     LEFT JOIN Intento I ON I.IdPublicacion = P.Id AND I.IdAlumno = A.Matricula${intentoJoinExtra}
+    LEFT JOIN Actividad AC ON AC.Id=P.IdActividad
+    ${INTENTO_VALIDO_APPLY}
     WHERE 1=1 ${scopeWhere} ${materiaWhere} ${divisionWhere}
   `;
 
@@ -342,11 +392,13 @@ async function getRendimientoListado(
       COUNT(DISTINCT A.Matricula) AS TotalAlumnos,
       COUNT(DISTINCT CASE WHEN I.Id IS NOT NULL THEN A.Matricula END) AS ConIntentos,
       COUNT(I.Id) AS TotalIntentos,
-      ISNULL(AVG(CAST(I.NotaFinal AS DECIMAL(10,2))), 0) AS PromedioGeneral,
-      CASE WHEN COUNT(CASE WHEN I.NotaFinal IS NOT NULL THEN 1 END) > 0
+      COUNT(CASE WHEN ${academicCondition} THEN 1 END) AS IntentosAlcanceAcademico,
+      ISNULL(AVG(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL
+        THEN CAST(I.NotaFinal*10.0/NULLIF(AC.EscalaCalificacion,0) AS DECIMAL(10,4)) END),0) AS PromedioGeneral,
+      CASE WHEN COUNT(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN 1 END) > 0
         THEN ROUND(
-          CAST(SUM(CASE WHEN I.NotaFinal >= 6 THEN 1 ELSE 0 END) AS FLOAT)
-          / NULLIF(COUNT(CASE WHEN I.NotaFinal IS NOT NULL THEN 1 END), 0) * 100, 1)
+          CAST(SUM(CASE WHEN ${academicCondition} AND I.NotaFinal>=AC.NotaAprobacion THEN 1 ELSE 0 END) AS FLOAT)
+          / NULLIF(COUNT(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN 1 END),0)*100,1)
         ELSE 0
       END AS TasaAprobacion
     ${fromClause}
@@ -361,7 +413,7 @@ async function getRendimientoListado(
   const orderBy = orderingMap[params.ordenarPor] || 'A.Nombre, A.Apellido';
   const dir = params.ordenDireccion === 'desc' ? 'DESC' : 'ASC';
 
-  const havingClause = buildHavingClause(params);
+  const havingClause = buildHavingClause(params, academicCondition);
 
   const listResult = await request.query(`
     SELECT
@@ -369,10 +421,12 @@ async function getRendimientoListado(
       A.Nombre,
       A.Apellido,
       COUNT(I.Id) AS TotalIntentos,
-      COUNT(CASE WHEN I.NotaFinal IS NOT NULL THEN 1 END) AS TotalCorregidos,
-      ISNULL(AVG(CAST(I.NotaFinal AS DECIMAL(10,2))), 0) AS Promedio,
-      SUM(CASE WHEN I.NotaFinal >= 6 THEN 1 ELSE 0 END) AS Aprobados,
-      SUM(CASE WHEN I.NotaFinal < 6 AND I.NotaFinal IS NOT NULL THEN 1 ELSE 0 END) AS Desaprobados
+      COUNT(CASE WHEN ${academicCondition} THEN 1 END) AS IntentosAlcanceAcademico,
+      COUNT(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN 1 END) AS TotalCorregidos,
+      ISNULL(AVG(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL
+        THEN CAST(I.NotaFinal*10.0/NULLIF(AC.EscalaCalificacion,0) AS DECIMAL(10,4)) END),0) AS Promedio,
+      SUM(CASE WHEN ${academicCondition} AND I.NotaFinal>=AC.NotaAprobacion THEN 1 ELSE 0 END) AS Aprobados,
+      SUM(CASE WHEN ${academicCondition} AND I.NotaFinal<AC.NotaAprobacion THEN 1 ELSE 0 END) AS Desaprobados
     ${fromClause}
     GROUP BY A.Matricula, A.Nombre, A.Apellido
     ${havingClause}
@@ -382,11 +436,16 @@ async function getRendimientoListado(
 
   const alumnos = listResult.recordset.map((row: any) => {
     const r = mapKeysToCamelCase(row) as any;
+    r.escalaPromedio = 10;
+    r.alcanceIntentos = params.alcanceIntentos;
     r.porcentajeAprobacion = r.totalCorregidos > 0
       ? Math.round((r.aprobados / r.totalCorregidos) * 1000) / 10
       : 0;
     return r;
   });
+  const kpis = mapKeysToCamelCase(globalKpiResult.recordset[0] || {}) as any;
+  kpis.escalaPromedio = 10;
+  kpis.alcanceIntentos = params.alcanceIntentos;
 
   return res.json({
     success: true,
@@ -397,7 +456,7 @@ async function getRendimientoListado(
         total,
         totalPaginas,
       },
-      kpis: mapKeysToCamelCase(globalKpiResult.recordset[0] || {}),
+      kpis,
       alumnos,
     },
   });
@@ -412,7 +471,9 @@ function buildFilterClause(
     estado: string | null;
     fechaDesde: string | null;
     fechaHasta: string | null;
+    alcanceIntentos: string;
   },
+  aplicarAlcance: boolean,
 ): string {
   const clauses: string[] = [];
   if (idDocente) clauses.push('AND MD.IdDocente = @IdDocente');
@@ -422,19 +483,24 @@ function buildFilterClause(
   if (filters.estado) clauses.push('AND I.Estado = @Estado');
   if (filters.fechaDesde) clauses.push('AND I.FechaInicio >= @FechaDesde');
   if (filters.fechaHasta) clauses.push('AND I.FechaInicio <= @FechaHasta');
+  if (aplicarAlcance && filters.alcanceIntentos === 'validos') {
+    clauses.push("AND I.Estado='entregado' AND I.Id=IVS.IdIntentoValido");
+  }
   return clauses.join(' ');
 }
 
 function buildHavingClause(params: {
   promedioMin: number | null;
   promedioMax: number | null;
-}): string {
+}, academicCondition: string): string {
   const clauses: string[] = [];
   if (params.promedioMin !== null) {
-    clauses.push(`AVG(CAST(I.NotaFinal AS DECIMAL(10,2))) >= ${params.promedioMin}`);
+    clauses.push(`AVG(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN
+      CAST(I.NotaFinal*10.0/NULLIF(AC.EscalaCalificacion,0) AS DECIMAL(10,4)) END) >= ${params.promedioMin}`);
   }
   if (params.promedioMax !== null) {
-    clauses.push(`AVG(CAST(I.NotaFinal AS DECIMAL(10,2))) <= ${params.promedioMax}`);
+    clauses.push(`AVG(CASE WHEN ${academicCondition} AND I.NotaFinal IS NOT NULL THEN
+      CAST(I.NotaFinal*10.0/NULLIF(AC.EscalaCalificacion,0) AS DECIMAL(10,4)) END) <= ${params.promedioMax}`);
   }
   return clauses.length > 0 ? `HAVING ${clauses.join(' AND ')}` : '';
 }

@@ -7,8 +7,23 @@ export async function autorizarComision(db: DbBanco, actor: ActorBanco, id: numb
   if (actor.role !== 'admin' && (actor.role !== 'docente' || !actor.idDocente || row.IdDocente !== actor.idDocente || !row.DocenteActivo))
     throw new BancoError(403, 'La comisión no pertenece al docente');
 }
+export async function autorizarPublicacion(db: DbBanco, actor: ActorBanco, id: number, bloquear: boolean) {
+  const lock = bloquear ? 'WITH (UPDLOCK,HOLDLOCK)' : '';
+  const row = (await consultar(db, `SELECT p.Id,p.IdActividad,p.IdMateriaDivision,
+    md.IdDocente,d.Estado AS DocenteActivo FROM dbo.Publicacion p ${lock}
+    JOIN dbo.MateriaDivision md ON md.Id=p.IdMateriaDivision
+    LEFT JOIN dbo.Docente d ON d.Legajo=md.IdDocente WHERE p.Id=@Id`, { Id: id })).recordset[0];
+  if (!row) throw new BancoError(404, 'Publicación no encontrada');
+  if (actor.role !== 'admin' && (actor.role !== 'docente' || !actor.idDocente ||
+      row.IdDocente !== actor.idDocente || !row.DocenteActivo)) {
+    throw new BancoError(403, 'La publicación no pertenece al docente', 'ATTEMPT_SCOPE_FORBIDDEN');
+  }
+  return row;
+}
 export async function autorizarActividad(db: DbBanco, actor: ActorBanco, id: number, editable: boolean) {
-  const row = (await consultar(db, 'SELECT Id,Estado,Revision FROM dbo.Actividad WITH (UPDLOCK,HOLDLOCK) WHERE Id=@Id', { Id: id })).recordset[0];
+  const row = (await consultar(db, `SELECT Id,Estado,Revision,EscalaCalificacion,NotaAprobacion,ModoPuntaje,
+    MostrarPuntajePorPregunta,CorreccionAutomaticaCerradas
+    FROM dbo.Actividad WITH (UPDLOCK,HOLDLOCK) WHERE Id=@Id`, { Id: id })).recordset[0];
   if (!row) throw new BancoError(404, 'Actividad no encontrada');
   const pubs = (await consultar(db, `SELECT p.Id,md.IdDocente,d.Estado AS DocenteActivo FROM dbo.Publicacion p
     JOIN dbo.MateriaDivision md ON md.Id=p.IdMateriaDivision LEFT JOIN dbo.Docente d ON d.Legajo=md.IdDocente

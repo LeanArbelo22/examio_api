@@ -93,9 +93,9 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Divisiones | Catálogo y CRUD parcial | archivos `divisiones.*` | Update/delete devuelven 501 |
 | Comisiones | MateriaDivision y alumnos | archivos `comisiones.*` | `MateriaDivision` es una relación central |
 | Evaluaciones | Actividades, borradores, publicación, grupos, preguntas y variantes | archivos `evaluaciones.*`, services `evaluacion-*` | Revisión optimista; publicación y guardado en banco transaccionales |
-| Intentos | Inicio, respuestas, entrega y corrección | archivos `intentos.*` | Flujo crítico y dependiente de SPs |
+| Intentos | Inicio, respuestas, entrega, corrección e historial propio filtrable | archivos `intentos.*`, services `intento-*` | Flujo crítico y dependiente de SPs |
 | Actas | Cabecera, detalles y cierre | archivos `actas.*` | Operaciones transaccionales y estados |
-| Telemetría | Navegación y alertas antifraude | archivos `telemetria.*` | Registra auditoría; no asumir anulación automática |
+| Telemetría | Navegación, alertas legacy e incidentes de foco con duración | archivos `telemetria.*`, `telemetria-focus.service.ts` | UUID idempotente; registra auditoría sin anulación automática |
 | Usuarios | Cuentas, hashes, roles y activación | archivos `usuarios.*` | Integridad cruzada con Alumno/Docente |
 | Reportes | Rendimiento por alumno y por publicación de evaluación | archivos `reportes.*` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
 
@@ -178,7 +178,7 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 16 suites y 337 tests pasan, también con
+Estado de referencia reciente: 21 suites y 407 tests pasan, también con
 `--runInBand --detectOpenHandles`. Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
 revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
 verificación en una base aislada; los mocks no prueban esos comportamientos reales.
@@ -215,6 +215,17 @@ Convenciones:
   paginación y alcance docente.
 - Borradores incompletos, publicación completa, referencias al banco e idempotencia
   persistente requieren la migración `20260926_evaluacion_revision_idempotencia.sql`.
+- La migración `20261011_calificacion_intentos_telemetria.sql` fue aplicada dos veces y
+  verificada en la base de prueba. No asumir que está aplicada en otros ambientes.
+- Etapas 1 a 6 de calificación implementadas: configuración 10/100, puntaje por grupo,
+  corrección por puntaje sobre `IntentoPregunta`, recálculo, override final auditado y
+  selección automática/manual del intento válido, más historial propio filtrable basado
+  en la identidad JWT y reportes con escala/umbral configurables. Los reportes admiten
+  alcance `todos|validos`, normalizan agregados mixtos a base 10 y preservan valores
+  originales por evaluación. Telemetría registra pérdidas de foco idempotentes con
+  duración y resumen, sin consecuencias automáticas. `esCorrecta` sigue como
+  compatibilidad temporal del endpoint de corrección. Las etapas 3 a 6 no requieren
+  otra migración.
 - Auth emite access JWT HS256 + refresh opaco, persiste familias en
   `AuthSession`/`AuthRefreshToken`, rota con bloqueo SQL y expone refresh/logout.
 - Base local fue poblada con datos demo de reportes, pero ninguna sesión debe
@@ -253,6 +264,9 @@ Convenciones:
   documentados. Reintentar con la misma clave/body; otra clave crea otra operación.
 - `Actividad.Revision` no es historial. Edición/publicación comparan
   `RevisionEsperada`; importación incrementa y devuelve la revisión.
+- Los puntajes pertenecen a `GrupoPregunta`, no a sus variantes. En modo iguales el
+  reparto se materializa en centavos por ID estable; en personalizados la publicación
+  exige suma exacta. El render alumno omite el máximo si la actividad lo configura.
 - Banco privado: propiedad por `Docente.Legajo`, estados y revisión optimista.
   `code` solo como borrador en v1. Admin no escribe ni importa bancos.
   Migración `20260908_banco_preguntas.sql` manual antes de desplegar. Nunca ejecutar al arrancar.
@@ -266,28 +280,33 @@ Convenciones:
   Banco no tiene historial de versiones ni protección frente a UPDATE SQL manual.
 - Intentos, respuestas, finalización y variantes dependen de consistencia entre
   varios SPs y tablas.
+- `IncidenteIntento` usa `(IdIntento,EventoId)` como idempotencia. Inicio/cierre pueden
+  llegar separados; no sobrescribir un evento completado ni agregar consecuencias
+  automáticas. La sincronización nueva vence siete días después del fin del intento,
+  pero un replay idéntico ya persistido debe seguir siendo válido.
 - Las transacciones de evaluaciones y actas deben hacer rollback ante cualquier
   fallo.
 - Estados incompletos: vencimiento automático, anulación manual, firma de acta y
   suspensión de alumno.
 - Divisiones expone update/delete, pero ambos responden 501.
 - Dos endpoints de docente usan actualmente `SP_Docente_VerMaterias`.
-- Existe inconsistencia de umbral de aprobación: algunos cálculos usan 4 y otros 6.
+- Fuera de reportes todavía pueden existir cálculos legacy con umbral 4 o 6. No
+  unificarlos incidentalmente sin confirmar el contrato académico del módulo.
 - `updateUsuario` puede nulificar asociaciones omitidas en una actualización
   parcial.
 - No devolver mensajes SQL internos ni datos sensibles en endpoints nuevos.
 - Los mocks son compartidos por suite: respetar orden y cantidad de llamadas
   `request/query/execute`, especialmente en consultas múltiples.
 - `reportes.controller.ts` contiene agregaciones y filtros dinámicos delicados;
-  preservar alcance docente y paginación.
-- En reportes por evaluación no existe selección académica canónica entre
-  intentos múltiples. Mantener métricas explícitamente por intento hasta que se
-  defina mejor/último/definitivo. KPIs y gráficos deben calcularse antes de
-  paginar y desde el mismo alcance SQL autorizado.
+  preservar alcance docente, separación entre conteos operativos y académicos,
+  normalización base 10 y paginación.
+- Los reportes consumen la selección canónica sólo cuando
+  `alcanceIntentos=validos`; `todos` es el default compatible. KPIs y gráficos deben
+  calcularse antes de paginar y desde el mismo alcance SQL autorizado.
 - `InscripcionMateria` no tiene fecha de alta: “alumnos alcanzados” por una
   publicación representa el padrón actual de la comisión, no un padrón histórico.
-- El umbral de aprobación usado por reportes es 6, pero existe deuda histórica
-  porque otros módulos usan 4; no unificarlo incidentalmente.
+- La aprobación en reportes usa `Actividad.NotaAprobacion`; no reintroducir constantes
+  4/6 ni promediar directamente notas de escalas diferentes.
 
 ## Contexto recomendado para agentes
 

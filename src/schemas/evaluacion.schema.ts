@@ -4,6 +4,10 @@ import { ImportacionesBancoSchema } from './banco.schema';
 const id = z.number().int().positive().max(2147483647);
 const tipo = z.enum(['evaluacion', 'tp', 'tarea']);
 const tipoPregunta = z.enum(['mc', 'vf', 'abierta', 'code']);
+// Los rangos y códigos funcionales estables se resuelven en el service.
+const escalaCalificacion = z.number();
+const nota = z.number();
+const modoPuntaje = z.enum(['iguales', 'personalizados']);
 const referenciaPregunta = z.object({ IdPregunta: id, RevisionEsperada: id }).strict();
 const referenciaGrupo = z.object({ IdGrupo: id, RevisionEsperada: id }).strict();
 
@@ -16,6 +20,7 @@ const VarianteBorradorSchema = z.object({
 }).strict();
 const GrupoBorradorSchema = z.object({
   Id: id.optional(), TituloReferencia: z.string().max(150).default(''),
+  PuntajeMaximo: nota.optional().nullable(),
   ReferenciaBanco: referenciaGrupo.optional(), Variantes: z.array(VarianteBorradorSchema).max(200).default([]),
 }).strict();
 
@@ -40,6 +45,7 @@ const VariantePublicableSchema = z.object({
 });
 const GrupoPublicableSchema = z.object({
   Id: id.optional(), TituloReferencia: z.string().trim().min(1).max(150),
+  PuntajeMaximo: nota.optional().nullable(),
   ReferenciaBanco: referenciaGrupo.optional(), Variantes: z.array(VariantePublicableSchema).min(1).max(200),
 }).strict();
 
@@ -49,6 +55,9 @@ const camposComunes = {
   DuracionMinutos: z.number().int().positive().nullable().default(90),
   RecursosPermitidos: z.string().max(500).optional(), IdMateriaDivision: id,
   FechaInicio: z.string().datetime().optional(), FechaFin: z.string().datetime().optional(),
+  EscalaCalificacion: escalaCalificacion.optional(), NotaAprobacion: nota.optional(),
+  ModoPuntaje: modoPuntaje.optional(), MostrarPuntajePorPregunta: z.boolean().optional(),
+  CorreccionAutomaticaCerradas: z.boolean().optional(),
   ImportacionesBanco: ImportacionesBancoSchema.optional(),
 };
 
@@ -90,6 +99,8 @@ export const PublicarActividadSchema = z.object({
   ...camposComunes, IdPublicacion: id, RevisionEsperada: id, GuardarTodoEnBanco: z.boolean(),
   GruposPreguntas: z.array(GrupoPublicableSchema).min(1).max(100),
 }).strict().superRefine((v, ctx) => validarFechas(v, ctx, false)).transform(completarFechas);
+
+export const SeleccionarIntentoValidoSchema = z.object({ IdIntento: id }).strict();
 
 export type ActividadInput = z.infer<typeof ActividadSchema>;
 export type ActividadUpdateInput = z.infer<typeof ActividadUpdateSchema>;

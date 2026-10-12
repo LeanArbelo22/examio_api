@@ -4,6 +4,12 @@ import { copiarBanco } from './banco-copy.service';
 import { detalleBanco } from './banco.service';
 import { autorizarActividad, autorizarComision, validarIdsAnidados } from './evaluacion-access.service';
 import { guardarActividadCompletaEnBanco } from './evaluacion-bank-save.service';
+import {
+  ConfiguracionCalificacion,
+  materializarPuntajes,
+  puntajeSql,
+  resolverConfiguracionCalificacion,
+} from './evaluacion-scoring.service';
 
 async function referenciaBanco(db: DbBanco, actor: ActorBanco, recurso: 'preguntas'|'grupos', referencia: any) {
   if (!referencia) return undefined;
@@ -18,10 +24,11 @@ async function insertarEstructura(db: DbBanco, actor: ActorBanco, actividad: num
   for (const grupo of grupos) {
     const refGrupo = await referenciaBanco(db, actor, 'grupos', grupo.ReferenciaBanco);
     const row = (await consultar(db, `INSERT INTO dbo.GrupoPregunta
-      (IdActividad,TituloReferencia,IdBancoGrupoOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
-      OUTPUT inserted.Id VALUES(@Actividad,@Titulo,@Banco,@Revision,
+      (IdActividad,TituloReferencia,PuntajeMaximo,IdBancoGrupoOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
+      OUTPUT inserted.Id VALUES(@Actividad,@Titulo,CAST(@Puntaje AS decimal(5,2)),@Banco,@Revision,
       CASE WHEN @Banco IS NULL THEN NULL ELSE SYSUTCDATETIME() END)`,
-    { Actividad: actividad, Titulo: grupo.TituloReferencia, Banco: refGrupo?.Id ?? null, Revision: refGrupo?.Revision ?? null })).recordset[0];
+    { Actividad: actividad, Titulo: grupo.TituloReferencia, Puntaje: puntajeSql(grupo.PuntajeMaximo),
+      Banco: refGrupo?.Id ?? null, Revision: refGrupo?.Revision ?? null })).recordset[0];
     for (const pregunta of grupo.Variantes) {
       const refPregunta = await referenciaBanco(db, actor, 'preguntas', pregunta.ReferenciaBanco);
       const p = (await consultar(db, `INSERT INTO dbo.Pregunta
@@ -38,7 +45,7 @@ async function insertarEstructura(db: DbBanco, actor: ActorBanco, actividad: num
 }
 
 async function estructuraExistente(db: DbBanco, actividad: number) {
-  const gruposRows = (await consultar(db, `SELECT Id,IdBancoGrupoOrigen,RevisionBancoOrigen FROM dbo.GrupoPregunta
+  const gruposRows = (await consultar(db, `SELECT Id,PuntajeMaximo,IdBancoGrupoOrigen,RevisionBancoOrigen FROM dbo.GrupoPregunta
     WHERE IdActividad=@Actividad ORDER BY Id`, { Actividad: actividad })).recordset;
   const grupos = gruposRows.map((r: any) => r.Id);
   const preguntas: Record<number, number[]> = {}; const opciones: Record<number, number[]> = {};
@@ -88,19 +95,20 @@ async function reemplazarEstructura(db: DbBanco, actor: ActorBanco, actividad: n
       const referencia = grupo.ReferenciaBanco
         ? await referenciaBanco(db, actor, 'grupos', grupo.ReferenciaBanco) : undefined;
       await consultar(db, `UPDATE dbo.GrupoPregunta SET TituloReferencia=@Titulo,
+        PuntajeMaximo=CASE WHEN @Puntaje IS NULL THEN PuntajeMaximo ELSE CAST(@Puntaje AS decimal(5,2)) END,
         IdBancoGrupoOrigen=COALESCE(IdBancoGrupoOrigen,@Banco),
         RevisionBancoOrigen=CASE WHEN IdBancoGrupoOrigen IS NULL THEN @Revision ELSE RevisionBancoOrigen END,
         FechaIncorporacionBanco=CASE WHEN IdBancoGrupoOrigen IS NULL AND @Banco IS NOT NULL THEN SYSUTCDATETIME() ELSE FechaIncorporacionBanco END
-        WHERE Id=@Id`, { Id: idGrupo, Titulo: grupo.TituloReferencia,
+        WHERE Id=@Id`, { Id: idGrupo, Titulo: grupo.TituloReferencia, Puntaje: puntajeSql(grupo.PuntajeMaximo),
         Banco: referencia?.Id ?? null, Revision: referencia?.Revision ?? null });
     } else {
       const referencia = await referenciaBanco(db, actor, 'grupos', grupo.ReferenciaBanco);
       idGrupo = (await consultar(db, `INSERT INTO dbo.GrupoPregunta
-        (IdActividad,TituloReferencia,IdBancoGrupoOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
-        OUTPUT inserted.Id VALUES(@Actividad,@Titulo,@Banco,@Revision,
+        (IdActividad,TituloReferencia,PuntajeMaximo,IdBancoGrupoOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
+        OUTPUT inserted.Id VALUES(@Actividad,@Titulo,CAST(@Puntaje AS decimal(5,2)),@Banco,@Revision,
         CASE WHEN @Banco IS NULL THEN NULL ELSE SYSUTCDATETIME() END)`,
       { Actividad: actividad, Titulo: grupo.TituloReferencia, Banco: referencia?.Id ?? null,
-        Revision: referencia?.Revision ?? null })).recordset[0].Id;
+        Revision: referencia?.Revision ?? null, Puntaje: puntajeSql(grupo.PuntajeMaximo) })).recordset[0].Id;
     }
 
     const preguntasRecibidas = new Set(grupo.Variantes.flatMap((p: any) => p.Id ? [p.Id] : []));
@@ -144,11 +152,21 @@ async function reemplazarEstructura(db: DbBanco, actor: ActorBanco, actividad: n
   }
 }
 
-async function actualizarCabecera(db: DbBanco, actividad: number, input: any) {
+async function actualizarCabecera(
+  db: DbBanco,
+  actividad: number,
+  input: any,
+  configuracion: ConfiguracionCalificacion,
+) {
   await consultar(db, `UPDATE dbo.Actividad SET Titulo=@Titulo,Descripcion=@Descripcion,Tipo=@Tipo,
-    CantidadIntentosMaximos=@Intentos,DuracionMinutos=@Duracion,RecursosPermitidos=@Recursos WHERE Id=@Id`,
+    CantidadIntentosMaximos=@Intentos,DuracionMinutos=@Duracion,RecursosPermitidos=@Recursos,
+    EscalaCalificacion=@Escala,NotaAprobacion=CAST(@Aprobacion AS decimal(5,2)),ModoPuntaje=@Modo,
+    MostrarPuntajePorPregunta=@MostrarPuntaje,CorreccionAutomaticaCerradas=@CorreccionAutomatica WHERE Id=@Id`,
   { Id: actividad, Titulo: input.Titulo, Descripcion: input.Descripcion ?? null, Tipo: input.Tipo,
-    Intentos: input.CantidadIntentosMaximos, Duracion: input.DuracionMinutos, Recursos: input.RecursosPermitidos ?? null });
+    Intentos: input.CantidadIntentosMaximos, Duracion: input.DuracionMinutos, Recursos: input.RecursosPermitidos ?? null,
+    Escala: configuracion.EscalaCalificacion, Aprobacion: puntajeSql(configuracion.NotaAprobacion),
+    Modo: configuracion.ModoPuntaje, MostrarPuntaje: configuracion.MostrarPuntajePorPregunta,
+    CorreccionAutomatica: configuracion.CorreccionAutomaticaCerradas });
   await consultar(db, `UPDATE dbo.Publicacion SET IdMateriaDivision=@Comision,
     FechaInicio=CAST(@Inicio AS datetime),FechaFin=CAST(@Fin AS datetime) WHERE Id=@Publicacion AND IdActividad=@Actividad`,
   { Publicacion: input.IdPublicacion, Actividad: actividad, Comision: input.IdMateriaDivision,
@@ -156,7 +174,8 @@ async function actualizarCabecera(db: DbBanco, actividad: number, input: any) {
 }
 
 export async function validarActividadPublicable(db: DbBanco, actividad: number) {
-  const header = (await consultar(db, `SELECT A.Estado,A.CantidadIntentosMaximos,A.DuracionMinutos,P.FechaInicio,P.FechaFin
+  const header = (await consultar(db, `SELECT A.Estado,A.CantidadIntentosMaximos,A.DuracionMinutos,P.FechaInicio,P.FechaFin,
+    A.EscalaCalificacion,A.NotaAprobacion,A.ModoPuntaje,A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas
     FROM dbo.Actividad A JOIN dbo.Publicacion P ON P.IdActividad=A.Id WHERE A.Id=@Id`, { Id: actividad })).recordset[0];
   if (!header || header.Estado !== 'borrador')
     throw new BancoError(400, 'La evaluación ya no está en borrador', 'EVALUATION_ALREADY_PUBLISHED');
@@ -164,8 +183,24 @@ export async function validarActividadPublicable(db: DbBanco, actividad: number)
       (header.DuracionMinutos !== null && header.DuracionMinutos <= 0) ||
       new Date(header.FechaFin) <= new Date(header.FechaInicio) || new Date(header.FechaFin) <= new Date())
     throw new BancoError(400, 'La configuración del borrador no es publicable', 'DRAFT_NOT_PUBLISHABLE');
-  const grupos = (await consultar(db, 'SELECT Id,TituloReferencia FROM dbo.GrupoPregunta WHERE IdActividad=@Id ORDER BY Id', { Id: actividad })).recordset;
+  const configuracion = resolverConfiguracionCalificacion({}, header);
+  const gruposSql = configuracion.ModoPuntaje === 'iguales' ? `
+    ;WITH Distribucion AS (
+      SELECT GP.Id,
+        CAST((((A.EscalaCalificacion * 100) / COUNT(*) OVER ()) +
+          CASE WHEN ROW_NUMBER() OVER (ORDER BY GP.Id) <= ((A.EscalaCalificacion * 100) % COUNT(*) OVER ())
+            THEN 1 ELSE 0 END) / 100.0 AS decimal(5,2)) AS Puntaje
+      FROM dbo.GrupoPregunta GP
+      JOIN dbo.Actividad A ON A.Id=GP.IdActividad
+      WHERE GP.IdActividad=@Id
+    )
+    UPDATE GP SET PuntajeMaximo=D.Puntaje
+    FROM dbo.GrupoPregunta GP JOIN Distribucion D ON D.Id=GP.Id;
+    SELECT Id,TituloReferencia,PuntajeMaximo FROM dbo.GrupoPregunta WHERE IdActividad=@Id ORDER BY Id;
+  ` : 'SELECT Id,TituloReferencia,PuntajeMaximo FROM dbo.GrupoPregunta WHERE IdActividad=@Id ORDER BY Id';
+  const grupos = (await consultar(db, gruposSql, { Id: actividad })).recordset;
   if (!grupos.length) throw new BancoError(400, 'La evaluación requiere al menos un grupo', 'DRAFT_NOT_PUBLISHABLE');
+  materializarPuntajes(grupos, configuracion, configuracion.ModoPuntaje === 'personalizados');
   for (const grupo of grupos) {
     if (!grupo.TituloReferencia?.trim()) throw new BancoError(400, 'Los grupos requieren título', 'DRAFT_NOT_PUBLISHABLE');
     const preguntas = (await consultar(db, 'SELECT Id,Enunciado,Tipo FROM dbo.Pregunta WHERE IdGrupoPregunta=@Id ORDER BY Id', { Id: grupo.Id })).recordset;
@@ -191,15 +226,26 @@ export async function crearEvaluacion(db: DbBanco, actor: ActorBanco, input: Act
   await autorizarComision(db, actor, input.IdMateriaDivision);
   if (input.GuardarTodoEnBanco && actor.role !== 'docente')
     throw new BancoError(403, 'Un administrador no puede escribir en un banco docente', 'FORBIDDEN');
+  const configuracion = resolverConfiguracionCalificacion(input);
+  const grupos = materializarPuntajes(
+    input.GruposPreguntas,
+    configuracion,
+    input.Estado === 'publicada' && configuracion.ModoPuntaje === 'personalizados',
+  );
   const actividad = (await consultar(db, `INSERT INTO dbo.Actividad
-    (Titulo,Descripcion,Tipo,CantidadIntentosMaximos,DuracionMinutos,Estado,RecursosPermitidos,Revision)
-    OUTPUT inserted.Id,inserted.Revision VALUES(@Titulo,@Descripcion,@Tipo,@Intentos,@Duracion,'borrador',@Recursos,1)`,
+    (Titulo,Descripcion,Tipo,CantidadIntentosMaximos,DuracionMinutos,Estado,RecursosPermitidos,Revision,
+     EscalaCalificacion,NotaAprobacion,ModoPuntaje,MostrarPuntajePorPregunta,CorreccionAutomaticaCerradas)
+    OUTPUT inserted.Id,inserted.Revision VALUES(@Titulo,@Descripcion,@Tipo,@Intentos,@Duracion,'borrador',@Recursos,1,
+     @Escala,CAST(@Aprobacion AS decimal(5,2)),@Modo,@MostrarPuntaje,@CorreccionAutomatica)`,
   { Titulo: input.Titulo, Descripcion: input.Descripcion ?? null, Tipo: input.Tipo,
-    Intentos: input.CantidadIntentosMaximos, Duracion: input.DuracionMinutos, Recursos: input.RecursosPermitidos ?? null })).recordset[0];
+    Intentos: input.CantidadIntentosMaximos, Duracion: input.DuracionMinutos, Recursos: input.RecursosPermitidos ?? null,
+    Escala: configuracion.EscalaCalificacion, Aprobacion: puntajeSql(configuracion.NotaAprobacion),
+    Modo: configuracion.ModoPuntaje, MostrarPuntaje: configuracion.MostrarPuntajePorPregunta,
+    CorreccionAutomatica: configuracion.CorreccionAutomaticaCerradas })).recordset[0];
   const publicacion = (await consultar(db, `INSERT INTO dbo.Publicacion(IdActividad,IdMateriaDivision,FechaInicio,FechaFin,Visible)
     OUTPUT inserted.Id VALUES(@Actividad,@Comision,CAST(@Inicio AS datetime),CAST(@Fin AS datetime),1)`,
   { Actividad: actividad.Id, Comision: input.IdMateriaDivision, Inicio: input.FechaInicio, Fin: input.FechaFin })).recordset[0];
-  await insertarEstructura(db, actor, actividad.Id, input.GruposPreguntas);
+  await insertarEstructura(db, actor, actividad.Id, grupos);
   const importaciones = input.ImportacionesBanco ? await copiarBanco(db, actor, actividad.Id, input.ImportacionesBanco) : [];
   let banco: any[] = [];
   let revision = actividad.Revision;
@@ -211,7 +257,7 @@ export async function crearEvaluacion(db: DbBanco, actor: ActorBanco, input: Act
     revision = publicada.Revision;
   }
   return { IdActividad: actividad.Id, IdPublicacion: publicacion.Id, Estado: input.Estado,
-    Revision: revision, Importaciones: importaciones, Banco: banco };
+    Revision: revision, ...configuracion, Importaciones: importaciones, Banco: banco };
 }
 
 async function verificarBorrador(db: DbBanco, actor: ActorBanco, actividad: number, revision: number, publicacion: number, comision: number) {
@@ -221,25 +267,31 @@ async function verificarBorrador(db: DbBanco, actor: ActorBanco, actividad: numb
   if (!actual.Publicaciones.some((p: any) => p.Id === publicacion))
     throw new BancoError(400, 'La publicación no pertenece a la actividad', 'REQUEST_INVALID');
   await autorizarComision(db, actor, comision);
+  return actual;
 }
 
 export async function modificarBorrador(db: DbBanco, actor: ActorBanco, actividad: number, input: ActividadUpdateInput) {
-  await verificarBorrador(db, actor, actividad, input.RevisionEsperada, input.IdPublicacion, input.IdMateriaDivision);
-  await actualizarCabecera(db, actividad, input);
-  await reemplazarEstructura(db, actor, actividad, input.GruposPreguntas);
+  const actual = await verificarBorrador(db, actor, actividad, input.RevisionEsperada, input.IdPublicacion, input.IdMateriaDivision);
+  const configuracion = resolverConfiguracionCalificacion(input, actual);
+  const grupos = materializarPuntajes(input.GruposPreguntas, configuracion, false);
+  await actualizarCabecera(db, actividad, input, configuracion);
+  await reemplazarEstructura(db, actor, actividad, grupos);
   const importaciones = input.ImportacionesBanco ? await copiarBanco(db, actor, actividad, input.ImportacionesBanco) : [];
   const updated = (await consultar(db, `UPDATE dbo.Actividad SET Revision=Revision+1
     OUTPUT inserted.Revision WHERE Id=@Id AND Revision=@Revision`, { Id: actividad, Revision: input.RevisionEsperada })).recordset[0];
   if (!updated) throw new BancoError(409, 'El borrador cambió; recargar antes de continuar', 'DRAFT_REVISION_CONFLICT');
-  return { IdActividad: actividad, IdPublicacion: input.IdPublicacion, Estado: 'borrador', Revision: updated.Revision, Importaciones: importaciones };
+  return { IdActividad: actividad, IdPublicacion: input.IdPublicacion, Estado: 'borrador', Revision: updated.Revision,
+    ...configuracion, Importaciones: importaciones };
 }
 
 export async function publicarBorrador(db: DbBanco, actor: ActorBanco, actividad: number, input: PublicarActividadInput) {
-  await verificarBorrador(db, actor, actividad, input.RevisionEsperada, input.IdPublicacion, input.IdMateriaDivision);
+  const actual = await verificarBorrador(db, actor, actividad, input.RevisionEsperada, input.IdPublicacion, input.IdMateriaDivision);
   if (input.GuardarTodoEnBanco && actor.role !== 'docente')
     throw new BancoError(403, 'Un administrador no puede escribir en un banco docente', 'FORBIDDEN');
-  await actualizarCabecera(db, actividad, input);
-  await reemplazarEstructura(db, actor, actividad, input.GruposPreguntas);
+  const configuracion = resolverConfiguracionCalificacion(input, actual);
+  const grupos = materializarPuntajes(input.GruposPreguntas, configuracion, configuracion.ModoPuntaje === 'personalizados');
+  await actualizarCabecera(db, actividad, input, configuracion);
+  await reemplazarEstructura(db, actor, actividad, grupos);
   const importaciones = input.ImportacionesBanco ? await copiarBanco(db, actor, actividad, input.ImportacionesBanco) : [];
   await validarActividadPublicable(db, actividad);
   const banco = input.GuardarTodoEnBanco ? await guardarActividadCompletaEnBanco(db, actor, actividad) : [];
@@ -248,5 +300,5 @@ export async function publicarBorrador(db: DbBanco, actor: ActorBanco, actividad
   { Id: actividad, Revision: input.RevisionEsperada })).recordset[0];
   if (!updated) throw new BancoError(409, 'El borrador cambió; recargar antes de continuar', 'DRAFT_REVISION_CONFLICT');
   return { IdActividad: actividad, IdPublicacion: input.IdPublicacion, Estado: 'publicada',
-    Revision: updated.Revision, Importaciones: importaciones, Banco: banco };
+    Revision: updated.Revision, ...configuracion, Importaciones: importaciones, Banco: banco };
 }

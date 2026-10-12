@@ -22,7 +22,7 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | `INT` | Claves primarias (con `IDENTITY`), foráneas, semestres, contadores. |
 | `NVARCHAR(n)` | Cadenas de longitud fija o variable (nombres, descripciones, correos). |
 | `NVARCHAR(MAX)` | Enunciados de preguntas (`Pregunta.Enunciado`). |
-| `DECIMAL(4,2)` | Notas y calificaciones (rango `0.00`–`10.00`, dos decimales fijos). |
+| `DECIMAL(5,2)` | Notas de intentos y puntajes configurables (hasta `100.00`). Las notas de actas conservan `DECIMAL(4,2)`. |
 | `DATETIME` | Fechas de inicio, fin, creación (`GETDATE()`). |
 | `BIT` | Flags booleanos (`Activo`, `Visible`, `EsCorrecta`). |
 
@@ -51,9 +51,9 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 
 | Tabla | Clave Primaria | Rol |
 |---|---|---|
-| `Actividad` | `Id INT IDENTITY` | Cabecera de evaluación/tp/tarea. Campos: `Titulo`, `Descripcion`, `Tipo` (CHECK: `'evaluacion'`, `'tp'`, `'tarea'`), `PermiteMultiplesIntentos BIT` (legacy), `CantidadIntentosMaximos INT`, `DuracionMinutos INT`, `Estado` (CHECK: `'borrador'`, `'publicada'`, `'archivada'`), `RecursosPermitidos` y `Revision INT` positiva para concurrencia optimista. |
+| `Actividad` | `Id INT IDENTITY` | Cabecera de evaluación/tp/tarea. Además de estado y revisión, conserva `EscalaCalificacion`, `NotaAprobacion`, `ModoPuntaje`, `MostrarPuntajePorPregunta` y `CorreccionAutomaticaCerradas`. |
 | `Publicacion` | `Id INT IDENTITY` | Instancia publicada de una `Actividad` en una `MateriaDivision`. Define ventana de tiempo (`FechaInicio`, `FechaFin`) y visibilidad (`Visible BIT`). |
-| `GrupoPregunta` | `Id INT IDENTITY` | Agrupación lógica de preguntas. FK a `Actividad(Id)`. Campos: `TituloReferencia` (ej. "SQL Básico"). |
+| `GrupoPregunta` | `Id INT IDENTITY` | Agrupación lógica de preguntas. FK a `Actividad(Id)`. `PuntajeMaximo DECIMAL(5,2)` pertenece al grupo porque cada intento sortea una variante del grupo. |
 | `Pregunta` | `Id INT IDENTITY` | Pregunta individual. FK a `GrupoPregunta(Id)`. Campos: `Enunciado NVARCHAR(MAX)`, `Tipo` (CHECK: `'mc'`, `'vf'`, `'abierta'`, `'code'`). |
 | `Opcion` | `Id INT IDENTITY` | Opciones de respuesta para preguntas `mc`/`vf`. FK a `Pregunta(Id)`. Campos: `Texto NVARCHAR(500)`, `EsCorrecta BIT`. |
 
@@ -61,8 +61,8 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 
 | Tabla | Clave Primaria | Rol |
 |---|---|---|
-| `Intento` | `Id INT IDENTITY` | Intento de examen iniciado por un alumno. FK a `Publicacion(Id)` y `Alumno(Matricula)`. Campos: `NumeroIntento INT`, `FechaInicio`, `FechaFin`, `Estado` (CHECK: `'en_progreso'`, `'entregado'`, `'vencido'`, `'anulado'`), `NotaFinal DECIMAL(4,2)` (NULL si hay preguntas abiertas pendientes de corrección manual), `NotaAutomatica DECIMAL(4,2)` (nota parcial de los componentes mc/vf, siempre se calcula al finalizar). |
-| **`IntentoPregunta`** | `Id INT IDENTITY` | **Congela las variantes del sorteo**. Por cada `GrupoPregunta` de la actividad, `SP_Intento_IniciarExamen` selecciona una `Pregunta` aleatoria (`ORDER BY NEWID()`) y la inserta aquí. `SP_Intento_ObtenerExamenDinamico` solo lee esta tabla. Sin esta tabla, el alumno recibiría preguntas distintas en cada renderizado. FK a `Intento(Id)` y `Pregunta(Id)`. |
+| `Intento` | `Id INT IDENTITY` | Intento de examen. `NotaFinal`, `NotaAutomatica`, `NotaFinalCalculada` y `NotaFinalManual` usan `DECIMAL(5,2)` para escalas 10/100. `NotaFinal` es el valor efectivo. |
+| **`IntentoPregunta`** | `Id INT IDENTITY` | Congela variante y `PuntajeMaximoSnapshot`. Conserva puntaje obtenido, origen automático/manual, comentario, actor y fecha; por eso una pregunta omitida podrá corregirse sin depender de `Respuesta`. |
 | `Respuesta` | `Id INT IDENTITY` | Contenedor de respuesta del alumno por pregunta. FK a `Intento(Id)` y `Pregunta(Id)`. Unique constraint `(IdIntento, IdPregunta)`. Campos: `RtaTexto NVARCHAR(MAX)` (para preguntas abiertas), `EsCorrecta BIT` (nullable, para corrección manual), `ComentariosDocente NVARCHAR(MAX)` (nullable). |
 | **`RespuestaOpcion`** | `(IdRespuesta, IdOpcion)` | **Junction** entre `Respuesta` y `Opcion`. Almacena qué opción(es) seleccionó el alumno. Permite el JOIN que usan `SP_Pregunta_ObtenerOpciones` y `SP_Intento_FinalizarExamen`. |
 | **`HistorialRespuesta`** | `Id INT IDENTITY` | **Auditoría de cambios de opción**. Cada vez que el alumno cambia su respuesta, `SP_Respuesta_GuardarOpcion` inserta aquí la opción anterior y la nueva. Permite reconstruir la secuencia completa de decisiones. |
@@ -108,7 +108,7 @@ Ejecutado por `POST /api/intentos/iniciar`. Transacción atómica que crea el in
 
 **Retorno:** `(IdIntento INT, Status NVARCHAR(2))` — siempre `'OK'`.
 
-**Código completo:**
+**Código de referencia anterior a la migración de calificación:**
 
 ```sql
 ALTER PROCEDURE [dbo].[SP_Intento_IniciarExamen]
@@ -168,8 +168,11 @@ END;
 1. Obtiene el `IdActividad` desde la `Publicacion` solicitada.
 2. Verifica si el alumno ya tiene un intento `'en_progreso'` para esa publicación. Si existe, lo retorna (no duplica).
 3. Si no existe, calcula el correlativo `NumeroIntento` y crea el registro en `Intento` con estado `'en_progreso'` y `FechaInicio = SYSUTCDATETIME()` (UTC puro).
-4. **Sorteo por `CROSS APPLY`**: por cada `GrupoPregunta` de la actividad, selecciona UNA pregunta aleatoria (`TOP 1 ... ORDER BY NEWID()`) y la inserta en `IntentoPregunta`. Esto CONGELA las variantes para todo el ciclo de vida del intento.
-5. Retorna `(IdIntento, Status)`.
+4. **Sorteo por `CROSS APPLY`**: por cada `GrupoPregunta` de la actividad, selecciona UNA pregunta aleatoria (`TOP 1 ... ORDER BY NEWID()`) y la inserta en `IntentoPregunta`.
+5. Con la migración `20261011_calificacion_intentos_telemetria.sql`, guarda también
+   `PuntajeMaximoSnapshot`; usa el puntaje materializado del grupo y conserva un
+   reparto igual determinístico como fallback para contenido histórico.
+6. Retorna `(IdIntento, Status)`.
 
 **Nota de timezone:** `FechaInicio` se almacena en **UTC** mediante `SYSUTCDATETIME()`. Todas las comparaciones temporales del sistema deben usar la misma referencia (UTC). El Frontend convierte a la zona horaria del usuario al momento de mostrar.
 
@@ -190,6 +193,8 @@ WHERE IP.IdIntento = @IdIntento;
 ```
 
 No hay sorteo, no hay `NEWID()`. Devuelve exactamente las preguntas que se fijaron al iniciar el intento.
+Con la migración de calificación también devuelve el máximo congelado y el flag de
+visibilidad; el controlador elimina el máximo del DTO del alumno cuando el flag está apagado.
 
 ### 3.3 Obtención de Opciones
 
@@ -232,7 +237,11 @@ Ejecutado por `POST /api/intentos/:id/finalizar`. Comportamiento detallado:
 
 Si el intento ya está en estado `'entregado'`, `'anulado'` o `'vencido'`, el SP **no lanza error**. Simplemente realiza `SELECT` del registro actual y retorna sin modificar nada. Esto elimina los 500 por doble llamado del Frontend.
 
-#### Bloque 2 — Conteo separado por tipo
+> Desde `20261011_calificacion_intentos_telemetria.sql`, el procedimiento deja de
+> calcular una proporción binaria global. La descripción siguiente se conserva
+> únicamente como referencia del comportamiento anterior a esa migración.
+
+#### Bloque 2 — Conteo separado por tipo (legacy)
 
 Se cuentan por separado:
 - **`@TotalChoice`**: preguntas de tipo `mc`/`vf` (objetivas, auto-corregibles).
@@ -257,7 +266,10 @@ El `SELECT` final devuelve `Id`, `IdAlumno`, `IdPublicacion`, `Estado`, `NotaFin
 
 ---
 
-**Columna `NotaAutomatica`:** Se agregó mediante migración para que el docente tenga visibilidad del rendimiento objetivo del alumno incluso en exámenes con desarrollo. Permite filtrar intentos pendientes con `WHERE NotaFinal IS NULL`.
+**Semántica vigente de `NotaAutomatica`:** suma de componentes cerrados corregidos
+automáticamente. Es `NULL` cuando no hubo componentes automáticos y nunca representa
+una nota final ficticia. `NotaFinalCalculada` sólo se completa cuando todas las
+preguntas sorteadas tienen puntaje; `NotaFinal` queda como nota efectiva.
 
 ### 3.6 Telemetría y Antifraude
 
@@ -604,3 +616,123 @@ en una sola transacción. Las FKs de procedencia siguen siendo informativas: no 
 sincronización ni cascada desde el banco. Al editar, los IDs anidados existentes se
 actualizan, los omitidos se eliminan y los nuevos se insertan; un origen persistido no
 puede reemplazarse por otro mediante la API.
+
+## 9. Calificación configurable y persistencia de etapas siguientes
+
+DDL: `migrations/20261011_calificacion_intentos_telemetria.sql`, posterior a las
+migraciones de banco y revisión/idempotencia. Es transaccional, idempotente, manual y
+no recalifica intentos históricos. Su verificación de solo lectura está en
+`scripts/verificar-calificacion-intentos-telemetria.sql`.
+
+- Las actividades existentes reciben exclusivamente los defaults aprobados:
+  escala 10, umbral 4, modo iguales, puntaje oculto y corrección automática activa.
+- `GrupoPregunta.PuntajeMaximo` queda nullable para borradores y contenido histórico.
+  El detalle calcula el reparto igual de borrador y la publicación lo materializa sobre
+  la estructura final, incluidas importaciones; publicación personalizada exige suma
+  exacta. El orden estable es `GrupoPregunta.Id`.
+- Las notas del intento se amplían a `DECIMAL(5,2)`; `DetalleActa` no cambia.
+- Los intentos nuevos congelan el máximo en `IntentoPregunta`. No se reconstruyen ni
+  alteran notas/correcciones históricas durante la migración.
+- `HistorialCorreccionIntentoPregunta` audita toda corrección manual, incluso cuando
+  reemplaza una autocorrección. `HistorialNotaIntento` audita cada override definitivo.
+- `IntentoValidoOverride` y su historial persisten la selección académica de la etapa 3.
+- `IncidenteIntento` persiste los intervalos de pérdida de foco de la etapa 6, con
+  unicidad por intento/evento y recepción idempotente desde la API.
+
+La migración reemplaza los tres SP existentes de inicio, render y finalización; no crea
+procedimientos nuevos. Repetición, constraints, concurrencia y rollback deben validarse
+en SQL Server aislado antes de desplegar.
+
+### 9.1 Corrección por puntaje y nota efectiva — etapa 2
+
+La corrección se asocia a `IntentoPregunta`, no a `Respuesta`: una pregunta omitida
+continúa siendo corregible. `PuntajeObtenido` admite cero, parciales y el máximo
+congelado; al corregir, `OrigenCorreccion` pasa a `manual` y se conservan actor, fecha,
+comentario e historial. La fila legacy de `Respuesta`, si existe, se sincroniza para
+mantener clientes anteriores, pero no es la fuente autoritativa del puntaje.
+
+Después de cada corrección se recalculan atómicamente:
+
+- `NotaAutomatica`: suma de componentes cuyo origen continúa siendo `automatica`;
+- `NotaFinalCalculada`: suma de todos los puntajes sólo cuando no quedan pendientes;
+- `NotaFinal`: `NotaFinalManual` si existe; en caso contrario, la calculada.
+
+`PUT /api/intentos/:idIntento/calificar` persiste el override en
+`NotaFinalManual`, actualiza `NotaFinal` y agrega `HistorialNotaIntento`. La validación
+usa la escala de la actividad y permite `100.00`. Los intentos históricos con
+`NotaFinal` previa y sin descomposición no se recalifican automáticamente.
+
+### 9.2 Intento académicamente válido — etapa 3
+
+La selección automática no elimina ni modifica intentos. Para cada par
+`(IdPublicacion, IdAlumno)` considera únicamente filas `Intento.Estado='entregado'` y
+elige una sola mediante `FechaFin DESC, NumeroIntento DESC, Id DESC`. Los estados
+`en_progreso`, `vencido` y `anulado` quedan fuera de la selección.
+
+`IntentoValidoOverride` reemplaza esa decisión automática cuando un docente propietario
+de la publicación o un administrador elige manualmente un intento entregado de la misma
+publicación y alumno. Su clave primaria garantiza un override por combinación y la
+unicidad de `IdIntento` evita reutilizar un intento en otra selección. Una entrega
+posterior no reemplaza el override.
+
+Cada alta o cambio efectivo agrega una acción `seleccionado` en
+`HistorialIntentoValidoOverride`; eliminar el override agrega `eliminado` con el intento
+anterior. La eliminación vuelve a la regla automática. Seleccionar otra vez el mismo
+intento o eliminar cuando no existe override es idempotente y no duplica historial.
+Las escrituras se realizan en transacción con bloqueos de actualización para evitar
+selecciones concurrentes inconsistentes. No se agregaron Stored Procedures.
+
+### 9.3 Historial filtrable del alumno — etapa 4
+
+`GET /api/intentos/mios` es una lectura parametrizada sobre las tablas existentes; no
+agrega tablas, columnas ni Stored Procedures. Parte de todos los intentos del alumno
+identificado por JWT, calcula primero el intento válido de cada publicación y luego
+aplica filtros, resumen y paginación en un único batch SQL.
+
+La consulta une `Intento`, `Publicacion`, `Actividad`, `MateriaDivision`, `Materia` y
+`Division`. `IntentoPregunta` se usa sólo para determinar si quedan correcciones
+pendientes. No consulta `Respuesta`, `RespuestaOpcion` ni `Opcion`.
+
+El resultado académico compara `Intento.NotaFinal` con
+`Actividad.NotaAprobacion`; no usa umbrales hardcodeados. El resumen cuenta todos los
+intentos filtrados, publicaciones distintas y, separadamente, resultados académicos de
+los intentos válidos que permanecen en el conjunto filtrado. La selección canónica se
+resuelve sobre el historial completo antes de filtrar para evitar que fechas, estado o
+resultado cambien artificialmente el intento válido.
+
+### 9.4 Reportes académicos consistentes — etapa 5
+
+Los reportes reutilizan `Actividad.EscalaCalificacion`, `Actividad.NotaAprobacion` e
+`IntentoValidoOverride`; no agregan tablas, columnas ni Stored Procedures. Los conteos
+operativos conservan todos los intentos y estados alcanzados. Las métricas académicas
+(calificados, promedio y aprobación) aceptan alcance `todos` o `validos`; este último
+resuelve primero el override manual y, en su ausencia, el último intento entregado con
+el mismo desempate estable de la etapa 3.
+
+Las filas de una publicación preservan promedio, escala y umbral originales. Los
+agregados que combinan actividades convierten cada nota a base 10 mediante
+`NotaFinal * 10 / EscalaCalificacion` antes de promediar. La aprobación siempre compara
+la nota original con `Actividad.NotaAprobacion`, nunca con un umbral global. El filtro de
+pendientes se aplica al conjunto de publicaciones antes de calcular KPIs, gráficos,
+total y paginación.
+
+### 9.5 Pérdidas de foco con duración — etapa 6
+
+La API utiliza `IncidenteIntento`, creada por
+`20261011_calificacion_intentos_telemetria.sql`. La unicidad
+`(IdIntento, EventoId)` permite que el cliente reintente el mismo UUID sin duplicar el
+evento. Una fila nace `iniciado` con `FechaInicioCliente` y
+`FechaRecepcionInicio`; puede crearse directamente o evolucionar a `completado` con
+`FechaFinCliente`, `DuracionMilisegundos` y `FechaRecepcionFin`.
+
+La escritura se serializa y valida que el intento pertenezca al alumno del JWT. Las
+lecturas validan la comisión del docente o permiten alcance institucional al
+administrador. El resumen cuenta todos los incidentes `focus_lost`, mientras que suma,
+promedio y máximo usan sólo duraciones completadas y se convierten de milisegundos a
+segundos. Los registros no cambian `Intento.Estado`, no generan alertas legacy ni
+dependen de cuál intento sea académicamente válido.
+
+La sincronización nueva o de cierre se acepta hasta siete días después de
+`Intento.FechaFin`, con cinco minutos de tolerancia de reloj. Los replays idénticos ya
+persistidos siguen siendo idempotentes aun después de esa ventana. No se agregaron
+tablas, columnas ni Stored Procedures en esta etapa.

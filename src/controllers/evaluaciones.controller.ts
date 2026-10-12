@@ -9,6 +9,7 @@ import { ActorBanco, BancoError, atomico, consultar } from '../services/banco-co
 import { responderErrorBanco } from './banco.controller';
 import { completarIdempotencia, iniciarIdempotencia } from '../services/idempotency.service';
 import { crearEvaluacion, modificarBorrador, publicarBorrador } from '../services/evaluacion-write.service';
+import { eliminarSeleccionIntentoValido, listarIntentosPublicacion, seleccionarIntentoValido } from '../services/intento-valido.service';
 
 function obtenerIdempotencyKey(req: Request) {
   const parsed = IdempotencyKeySchema.safeParse(req.header('Idempotency-Key'));
@@ -64,7 +65,14 @@ export const obtenerExamenSorteado = async (req: Request, res: Response) => {
     const result = await pool.request()
       .input('IdIntento', sql.Int, req.params.idIntento)
       .execute('SP_Intento_ObtenerExamenDinamico');
-    res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
+    const data = result.recordset.map((row: any) => {
+      const mapped = mapKeysToCamelCase(row) as Record<string, unknown>;
+      const mostrarPuntaje = Boolean(row.MostrarPuntajePorPregunta);
+      delete mapped.mostrarPuntajePorPregunta;
+      if (!mostrarPuntaje) delete mapped.puntajeMaximo;
+      return mapped;
+    });
+    res.json({ success: true, data });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error desconocido';
     res.status(500).json({ success: false, message });
@@ -112,7 +120,8 @@ export const obtenerPendientesPorAlumno = async (req: Request, res: Response) =>
       .query(`
         SELECT P.Id AS IdPublicacion, A.Titulo, A.Descripcion, A.DuracionMinutos,
                P.FechaInicio, P.FechaFin, A.RecursosPermitidos,
-               A.CantidadIntentosMaximos,
+               A.CantidadIntentosMaximos,A.EscalaCalificacion,A.NotaAprobacion,
+               A.ModoPuntaje,A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                M.Nombre AS Materia, C.Nombre AS Carrera,
                D.Nombre + ' ' + D.Apellido AS Docente,
                ULT.Estado AS EstadoUltimoIntento,
@@ -167,6 +176,8 @@ export const obtenerPublicacionPorId = async (req: Request, res: Response) => {
       .query(`
         SELECT P.Id AS IdPublicacion, A.Titulo, A.Descripcion, A.DuracionMinutos,
                P.FechaInicio, P.FechaFin, A.RecursosPermitidos,
+               A.EscalaCalificacion,A.NotaAprobacion,A.ModoPuntaje,
+               A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                M.Nombre AS Materia, C.Nombre AS Carrera,
                D.Nombre + ' ' + D.Apellido AS Docente,
                (SELECT COUNT(*) FROM GrupoPregunta WHERE IdActividad = A.Id) AS GruposCount
@@ -196,6 +207,8 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
       .query(`
         SELECT A.Id AS IdActividad, A.Titulo, A.Descripcion, A.Tipo, A.DuracionMinutos,
                A.CantidadIntentosMaximos, A.Estado, A.RecursosPermitidos, A.Revision,
+               A.EscalaCalificacion,A.NotaAprobacion,A.ModoPuntaje,
+               A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                P.Id AS IdPublicacion, P.FechaInicio, P.FechaFin,
                M.Nombre AS Materia, Dv.Descripcion AS Division
         FROM Actividad A
@@ -215,14 +228,26 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
     const detalleResult = await pool.request()
       .input('IdActividad', sql.Int, header.IdActividad)
       .query(`
+        ;WITH GruposDetalle AS (
+          SELECT GP.*,
+            ROW_NUMBER() OVER (ORDER BY GP.Id) AS Posicion,
+            COUNT(*) OVER () AS TotalGrupos
+          FROM GrupoPregunta GP
+          WHERE GP.IdActividad=@IdActividad
+        )
         SELECT GP.Id AS IdGrupo, GP.TituloReferencia,
+               CAST(CASE WHEN A.ModoPuntaje='iguales' THEN
+                 (((A.EscalaCalificacion * 100) / GP.TotalGrupos) +
+                   CASE WHEN GP.Posicion <= ((A.EscalaCalificacion * 100) % GP.TotalGrupos) THEN 1 ELSE 0 END) / 100.0
+                 ELSE GP.PuntajeMaximo END AS decimal(5,2)) AS PuntajeMaximo,
                GP.IdBancoGrupoOrigen, GP.RevisionBancoOrigen AS RevisionGrupoBancoOrigen,
                GP.FechaIncorporacionBanco AS FechaGrupoIncorporacionBanco,
                PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,
                PR.IdBancoPreguntaOrigen, PR.RevisionBancoOrigen AS RevisionPreguntaBancoOrigen,
                PR.FechaIncorporacionBanco AS FechaPreguntaIncorporacionBanco,
                O.Id AS IdOpcion, O.Texto, O.EsCorrecta
-        FROM GrupoPregunta GP
+        FROM GruposDetalle GP
+        INNER JOIN Actividad A ON A.Id=GP.IdActividad
         INNER JOIN Pregunta PR ON PR.IdGrupoPregunta = GP.Id
         LEFT JOIN Opcion O ON O.IdPregunta = PR.Id
         WHERE GP.IdActividad = @IdActividad
@@ -237,6 +262,7 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
         gruposMap[row.IdGrupo] = {
           idGrupo: row.IdGrupo,
           tituloReferencia: row.TituloReferencia,
+          puntajeMaximo: row.PuntajeMaximo,
           idBancoGrupoOrigen: row.IdBancoGrupoOrigen,
           revisionBancoOrigen: row.RevisionGrupoBancoOrigen,
           fechaIncorporacionBanco: row.FechaGrupoIncorporacionBanco,
@@ -310,4 +336,47 @@ export const getAlumnosByPublicacion = async (req: Request, res: Response) => {
     const message = err instanceof Error ? err.message : 'Error desconocido';
     res.status(500).json({ success: false, message });
   }
+};
+
+export const listarIntentosAlumnoPublicacion = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await listarIntentosPublicacion(
+      pool,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+    );
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
+};
+
+export const seleccionarIntentoValidoAlumno = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await atomico(tx => seleccionarIntentoValido(
+      tx,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+      req.body.IdIntento,
+    ));
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
+};
+
+export const eliminarIntentoValidoAlumno = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await atomico(tx => eliminarSeleccionIntentoValido(
+      tx,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+    ));
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
 };

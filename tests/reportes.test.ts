@@ -609,7 +609,7 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
 
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText).toContain("I.Estado = 'entregado' AND I.NotaFinal IS NULL");
-    expect(sqlText).toContain("I.Estado = 'entregado' AND I.NotaFinal IS NOT NULL");
+    expect(sqlText).toMatch(/I\.Estado = 'entregado'\s+AND I\.NotaFinal IS NOT NULL/);
     expect(sqlText).toContain("I.Estado = 'en_progreso'");
     expect(sqlText).toContain("I.Estado = 'vencido'");
     expect(sqlText).toContain("I.Estado = 'anulado'");

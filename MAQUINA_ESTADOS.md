@@ -135,7 +135,7 @@ Las máquinas de estado son el núcleo de la integridad académica de EXAMIO. Ca
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------- |
 | — → `en_progreso`           | Alumno inicia examen. El SP congela variantes y retorna `IdIntento`. Idempotente: si ya hay un intento en progreso, retorna el mismo.                | `POST /api/intentos/iniciar`       | `IniciarExamenSchema` |
 | `en_progreso` → `entregado` | Alumno finaliza explícitamente. El SP calcula `NotaAutomatica` y decide `NotaFinal` según composición del examen. Idempotente.                       | `POST /api/intentos/:id/finalizar` | —                     |
-| `en_progreso` → `anulado`   | Automático por Telemetría: El alumno supera el límite de infracciones permitidas (ej. salidas de pantalla completa) o el docente penaliza el examen. | `POST /api/telemetria/alerta`      | `AlertaSchema`        |
+| `en_progreso` → `anulado`   | **No implementado.** Telemetría registra alertas e incidentes de foco, pero no aplica consecuencias automáticas.                                | —                                  | —                     |
 | `en_progreso` → `vencido`   | **No implementado.** (Reservado para timeout automático.)                                                                                            | —                                  | —                     |
 
 **Body `POST /api/intentos/iniciar`:**
@@ -419,7 +419,10 @@ La API Node podría exponer un endpoint `/api/intentos/vencer` (protegido para `
 ### Brecha 2 — Falta de Endpoint para Anulación Manual por el Docente
 
 **Problema:**
-El estado `anulado` funciona correctamente de forma automatizada a través del módulo de telemetría (`POST /api/telemetria/alerta`) cuando se dispara el algoritmo de detección de fraude. Sin embargo, no existe un mecanismo en la API para que un docente pueda anular un examen de forma manual por un criterio externo (ej. comportamiento sospechoso en el aula presencial).
+El estado `anulado` está reservado, pero telemetría no lo asigna automáticamente. Los
+endpoints de alertas e incidentes sólo registran evidencia para auditoría. Tampoco existe
+un mecanismo en la API para que un docente pueda anular un examen manualmente por un
+criterio externo (por ejemplo, comportamiento sospechoso en el aula presencial).
 
 **Recomendación:**
 Agregar un endpoint administrativo dedicado:

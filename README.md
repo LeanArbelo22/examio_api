@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 337 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 407 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -711,6 +711,9 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 | GET | `/api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/evaluaciones/publicacion/:id` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/evaluaciones/pendientes/:matricula` | — | `alumno`, `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intentos` | — | `alumno`*, `admin`, `docente` |
+| PUT | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido` | `SeleccionarIntentoValidoSchema` | `admin`, `docente` |
+| DELETE | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido` | — | `admin`, `docente` |
 | GET | `/api/evaluaciones/:id/detalle` | — | `admin`, `docente` |
 | GET | `/api/evaluaciones/:id/alumnos` | — | `admin`, `docente` |
 
@@ -732,9 +735,15 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
   "FechaInicio": "2026-06-15T10:00:00Z",
   "FechaFin": "2026-06-15T12:00:00Z",
   "Estado": "borrador",
+  "EscalaCalificacion": 100,
+  "NotaAprobacion": 40,
+  "ModoPuntaje": "personalizados",
+  "MostrarPuntajePorPregunta": true,
+  "CorreccionAutomaticaCerradas": false,
   "GruposPreguntas": [
     {
       "TituloReferencia": "SQL Básico",
+      "PuntajeMaximo": 100,
       "Variantes": [
         {
           "Enunciado": "¿Qué comando SELECT es correcto?",
@@ -752,7 +761,9 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 
 Un borrador admite cero grupos, grupos sin variantes, títulos/enunciados temporales
 vacíos y preguntas incompletas. Defaults: `Tipo=evaluacion`, un intento, 90 minutos,
-inicio UTC ahora + 5 minutos, fin inicio + 24 horas y `GruposPreguntas=[]`. Las fechas
+escala 10, nota de aprobación 4, puntajes iguales, puntaje oculto para el alumno,
+corrección automática de cerradas habilitada, inicio UTC ahora + 5 minutos,
+fin inicio + 24 horas y `GruposPreguntas=[]`. Las fechas
 pueden quedar en el pasado al editar, pero siempre debe cumplirse `FechaFin > FechaInicio`.
 La creación responde:
 
@@ -764,6 +775,11 @@ La creación responde:
     "idPublicacion": 15,
     "estado": "borrador",
     "revision": 1,
+    "escalaCalificacion": 10,
+    "notaAprobacion": 4,
+    "modoPuntaje": "iguales",
+    "mostrarPuntajePorPregunta": false,
+    "correccionAutomaticaCerradas": true,
     "importaciones": [],
     "banco": []
   }
@@ -815,6 +831,11 @@ La creación responde:
     "cantidadIntentosMaximos": 2,
     "estado": "publicada",
     "revision": 2,
+    "escalaCalificacion": 10,
+    "notaAprobacion": 4,
+    "modoPuntaje": "iguales",
+    "mostrarPuntajePorPregunta": false,
+    "correccionAutomaticaCerradas": true,
     "recursosPermitidos": null,
     "idPublicacion": 5,
     "fechaInicio": "2026-06-15T10:00:00.000Z",
@@ -825,6 +846,7 @@ La creación responde:
       {
         "idGrupo": 1,
         "tituloReferencia": "SQL Básico",
+        "puntajeMaximo": 10,
         "preguntas": [
           {
             "idPregunta": 10,
@@ -841,6 +863,88 @@ La creación responde:
   }
 }
 ```
+
+#### Configuración de calificación — etapa 1
+
+- `EscalaCalificacion` acepta únicamente `10` o `100`.
+- `NotaAprobacion` debe estar entre cero y la escala, con hasta dos decimales.
+  Al crear, su default es 4 para escala 10 y 40 para escala 100.
+- Al cambiar la escala de un borrador debe enviarse una nota de aprobación explícita;
+  el backend no convierte valores silenciosamente.
+- `ModoPuntaje="iguales"` ignora como fuente autoritativa cualquier reparto enviado.
+  El detalle de borrador calcula el reparto sobre la estructura completa y la publicación
+  lo materializa en centavos, por orden estable de grupos, incluyendo importaciones.
+- `ModoPuntaje="personalizados"` permite una configuración incompleta en borrador,
+  pero publicar exige `PuntajeMaximo` en cada grupo y suma exacta igual a la escala.
+  Una importación nueva en este modo debe guardarse primero en borrador para asignarle
+  puntaje antes de publicar.
+- El detalle docente siempre incluye `puntajeMaximo`. El render del alumno lo omite
+  cuando `MostrarPuntajePorPregunta=false`.
+- `CorreccionAutomaticaCerradas` se persiste y el SP de finalización respeta el flag.
+  La etapa 2 permite reemplazar esas autocorrecciones mediante el mismo endpoint de
+  corrección, dejando auditoría.
+
+Esta funcionalidad requiere aplicar manualmente
+`migrations/20261011_calificacion_intentos_telemetria.sql`, después de las migraciones
+del banco y de revisión/idempotencia. Validar luego con
+`scripts/verificar-calificacion-intentos-telemetria.sql`. El backend no ejecuta DDL al arrancar.
+
+#### Selección del intento académicamente válido — etapa 3
+
+`GET /api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intentos`
+devuelve el resumen de todos los intentos de esa combinación, sin respuestas ni opciones.
+El alumno sólo puede consultar su propia matrícula; el docente sólo puede consultar
+publicaciones de sus comisiones activas. Admin conserva acceso global.
+
+Si no existe una selección manual, el intento válido es el último con estado `entregado`,
+ordenado de forma determinística por `fechaFin DESC`, `numeroIntento DESC` e
+`idIntento DESC`. Los intentos `en_progreso`, `vencido` y `anulado` nunca desplazan a
+uno entregado. Cada elemento agrega `esIntentoValido` y
+`seleccionIntentoValido` (`automatica`, `manual` o `null`).
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "idIntento": 12,
+      "idPublicacion": 5,
+      "idAlumno": 30500,
+      "numeroIntento": 2,
+      "estado": "entregado",
+      "fechaInicio": "2026-10-11T13:00:00.000Z",
+      "fechaFin": "2026-10-11T14:00:00.000Z",
+      "notaFinal": 8.5,
+      "escalaCalificacion": 10,
+      "notaAprobacion": 4,
+      "estadoCorreccion": "completa",
+      "preguntasPendientesCorreccion": 0,
+      "esIntentoValido": true,
+      "seleccionIntentoValido": "automatica"
+    }
+  ]
+}
+```
+
+Para fijar manualmente un intento entregado:
+
+```http
+PUT /api/evaluaciones/publicaciones/5/alumnos/30500/intento-valido
+Content-Type: application/json
+
+{ "IdIntento": 11 }
+```
+
+La selección manual es persistente, auditada y prevalece aunque después se entregue
+otro intento. Repetir el mismo `IdIntento` es idempotente. `DELETE` sobre el mismo path
+elimina el override, también de forma auditada, y restaura inmediatamente la regla
+automática. Si no hay intentos entregados, devuelve `idIntento: null`.
+
+Errores funcionales estables: `ATTEMPT_SCOPE_FORBIDDEN` (403) para acceso fuera de
+alcance y `ATTEMPT_SELECTION_INVALID` (409) cuando el candidato no está entregado, no
+pertenece a la combinación indicada o la selección persistida es incoherente. Esta
+etapa reutiliza las tablas creadas por la migración de calificación; no requiere un
+script SQL adicional.
 
 **Response `GET /api/evaluaciones/:id/alumnos`:**
 
@@ -934,6 +1038,7 @@ La creación responde:
 | POST | `/api/intentos/iniciar` | `IniciarExamenSchema` | `alumno`, `admin` |
 | POST | `/api/intentos/guardar-respuesta` | `GuardarRespuestaSchema` | `alumno`, `admin` |
 | POST | `/api/intentos/:id/finalizar` | — | `alumno`, `admin` |
+| GET | `/api/intentos/mios` | `MisIntentosQuerySchema` (query) | `alumno` |
 | GET | `/api/intentos/alumno/:idAlumno` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/intentos/alumno/:idAlumno/detallados` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/intentos/alumno/:idAlumno/historial-corregido` | — | `alumno`, `admin`, `docente` |
@@ -949,6 +1054,94 @@ La creación responde:
   "IdAlumno": 30500
 }
 ```
+
+#### Historial filtrable del alumno — etapa 4
+
+`GET /api/intentos/mios` toma la matrícula exclusivamente del access token. No recibe
+ni acepta `matricula` o `idAlumno` desde el navegador. Es un endpoint de resumen: no
+expone preguntas, respuestas, opciones ni contenido completo del examen.
+
+Filtros opcionales, combinados con semántica AND:
+
+| Query | Valores |
+|---|---|
+| `idMateria` | entero positivo |
+| `idMateriaDivision` | entero positivo |
+| `fechaDesde`, `fechaHasta` | fecha `YYYY-MM-DD` o timestamp ISO 8601 |
+| `estado` | `en_progreso`, `entregado`, `vencido`, `anulado` |
+| `resultado` | `aprobado`, `desaprobado`, `pendiente` |
+| `pagina` | entero positivo; default `1` |
+| `limite` | `1..100`; default `20` |
+| `ordenarPor` | `fecha`, `materia`, `evaluacion`, `nota`; default `fecha` |
+| `ordenDireccion` | `asc`, `desc`; default `desc` |
+
+Las fechas filtran `Intento.FechaInicio`. Una `fechaHasta` sin hora incluye el día
+completo mediante un límite superior exclusivo al comienzo del día siguiente; un
+timestamp se compara de forma inclusiva. El orden siempre agrega `idIntento DESC` como
+desempate estable.
+
+`resultado` usa la nota efectiva `Intento.NotaFinal` y el umbral particular
+`Actividad.NotaAprobacion`; una nota nula produce `pendiente`. Se preservan la nota y
+escala originales, por lo que el endpoint no mezcla ni normaliza silenciosamente
+escalas 10/100.
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "idIntento": 15,
+        "idActividad": 8,
+        "idPublicacion": 12,
+        "titulo": "Parcial SQL",
+        "tipo": "evaluacion",
+        "idMateria": 4,
+        "materia": "Bases de Datos",
+        "idMateriaDivision": 9,
+        "division": "2A",
+        "numeroIntento": 2,
+        "cantidadIntentosMaximos": 3,
+        "estado": "entregado",
+        "fechaInicio": "2026-10-01T10:00:00.000Z",
+        "fechaFin": "2026-10-01T11:00:00.000Z",
+        "notaAutomatica": 65,
+        "notaFinal": 72,
+        "escalaCalificacion": 100,
+        "notaAprobacion": 40,
+        "resultado": "aprobado",
+        "estadoCorreccion": "completa",
+        "esIntentoValido": true,
+        "seleccionIntentoValido": "automatica"
+      }
+    ],
+    "resumen": {
+      "totalIntentos": 12,
+      "totalEvaluaciones": 7,
+      "evaluacionesAprobadas": 4,
+      "evaluacionesDesaprobadas": 2,
+      "evaluacionesPendientes": 1
+    },
+    "paginacion": {
+      "pagina": 1,
+      "limite": 20,
+      "total": 12,
+      "totalPaginas": 1
+    }
+  }
+}
+```
+
+El resumen se calcula sobre todos los intentos que cumplen los filtros, antes de
+paginar. `totalIntentos` cuenta todas las filas y `totalEvaluaciones` las publicaciones
+distintas. Las tres categorías académicas cuentan sólo intentos canónicamente válidos;
+por eso una publicación que únicamente tenga intentos no entregados no integra todavía
+aprobadas, desaprobadas ni pendientes académicas.
+
+La marca válida se resuelve antes de aplicar filtros: prevalece el override manual y,
+si no existe, el último `entregado` por `FechaFin`, `NumeroIntento` e `Id`. Filtrar la
+página no cambia cuál es el intento válido. Los endpoints históricos con matrícula se
+mantienen sin cambios por compatibilidad.
 
 **Response `GET /api/intentos/:idIntento/completo`:**
 
@@ -967,7 +1160,11 @@ La creación responde:
     "idPublicacion": 5,
     "estado": "entregado",
     "notaFinal": null,
-    "notaAutomatica": 8.00,
+    "notaAutomatica": 2.00,
+    "notaFinalCalculada": null,
+    "notaFinalManual": null,
+    "escalaCalificacion": 10,
+    "notaAprobacion": 4,
     "fechaInicio": "2026-06-15T10:00:00.000Z",
     "fechaFin": "2026-06-15T11:30:00.000Z",
     "numeroIntento": 1,
@@ -983,6 +1180,12 @@ La creación responde:
         "enunciado": "¿Qué comando SELECT es correcto?",
         "tipo": "mc",
         "grupoConceptualmente": "SQL Básico",
+        "puntajeMaximo": 2.00,
+        "puntajeObtenido": 2.00,
+        "origenCorreccion": "automatica",
+        "comentariosDocente": null,
+        "corregidoPor": null,
+        "fechaCorreccion": "2026-06-15T11:30:00.000Z",
         "respuesta": {
           "idRespuesta": 1,
           "rtaTexto": null,
@@ -1030,12 +1233,27 @@ La creación responde:
 }
 ```
 
+`notaFinal` acepta hasta dos decimales y se valida contra la
+`escalaCalificacion` de la actividad, por lo que `100.00` es válido únicamente en
+escala 100. Este endpoint conserva su path y body, pero la nota se registra como
+override docente en `NotaFinalManual`, actualiza la nota efectiva `NotaFinal` y
+genera una fila de auditoría. No modifica `NotaFinalCalculada`.
+
 **Response `PUT /api/intentos/:idIntento/calificar`:**
 
 ```json
 {
   "success": true,
-  "message": "Nota asignada correctamente"
+  "message": "Nota asignada correctamente",
+  "data": {
+    "idIntento": 1,
+    "notaAutomatica": 2,
+    "notaFinalCalculada": 8.5,
+    "notaFinalManual": 7.5,
+    "notaFinal": 7.5,
+    "escalaCalificacion": 10,
+    "notaAprobacion": 4
+  }
 }
 ```
 
@@ -1043,21 +1261,52 @@ La creación responde:
 
 > ⚠️ **Excepción a la regla PascalCase.** Este endpoint no pasa por un SP; el controlador consume los datos directamente. Las claves se envían en **camelCase** (mismo criterio que `CalificarSchema`).
 
+Contrato canónico:
+
 ```json
 {
-  "esCorrecta": true,
-  "comentariosDocente": "Excelente respuesta, demuestra dominio del concepto."
+  "puntajeObtenido": 1.5,
+  "comentariosDocente": "Respuesta parcialmente correcta."
 }
 ```
+
+Por compatibilidad sigue aceptándose `esCorrecta: true|false|null`: `true` se
+traduce al máximo congelado, `false` a cero y `null` deja la pregunta pendiente.
+Si se envían ambos campos, `puntajeObtenido` es autoritativo. El puntaje debe estar
+entre cero y `puntajeMaximo`, con hasta dos decimales.
+
+La operación actualiza `IntentoPregunta`, por lo que admite preguntas omitidas sin
+fila en `Respuesta`. También permite reemplazar una corrección automática: el origen
+pasa a `manual` y se registra el valor anterior/nuevo, comentario, usuario y fecha en
+el historial. Luego recalcula `NotaAutomatica`, `NotaFinalCalculada` y la nota efectiva;
+un override docente existente siempre prevalece. La operación es transaccional y el
+docente debe pertenecer a la comisión del intento.
 
 **Response `PUT /api/intentos/:idIntento/preguntas/:idPregunta/corregir`:**
 
 ```json
 {
   "success": true,
-  "message": "Respuesta corregida correctamente"
+  "message": "Respuesta corregida correctamente",
+  "data": {
+    "idIntento": 1,
+    "idPregunta": 10,
+    "puntajeMaximoSnapshot": 2,
+    "puntajeObtenido": 1.5,
+    "origenCorreccion": "manual",
+    "comentariosDocente": "Respuesta parcialmente correcta.",
+    "notaFinalCalculada": 8.5,
+    "notaFinalManual": null,
+    "notaFinal": 8.5,
+    "escalaCalificacion": 10,
+    "notaAprobacion": 4
+  }
 }
 ```
+
+Errores funcionales relevantes: `QUESTION_SCORE_OUT_OF_RANGE` (400),
+`ATTEMPT_NOT_DELIVERED` (400 para un intento todavía en progreso) y
+`ATTEMPT_SCOPE_FORBIDDEN` (403).
 
 **Response `GET /api/intentos/alumno/:idAlumno/detallados`:**
 
@@ -1145,6 +1394,9 @@ La creación responde:
 | POST | `/api/telemetria/alerta` | `AlertaSchema` | `alumno`, `admin` |
 | GET | `/api/telemetria/alerta/:idIntento` | — | `docente`, `admin` |
 | POST | `/api/telemetria/navegacion` | `NavegacionSchema` | `alumno`, `admin` |
+| PUT | `/api/telemetria/intentos/:idIntento/incidentes/:eventoId` | `IncidenteFocoSchema` | `alumno`, `admin` |
+| GET | `/api/telemetria/intentos/:idIntento/resumen` | — | `docente`, `admin` |
+| GET | `/api/telemetria/intentos/:idIntento/incidentes` | — | `docente`, `admin` |
 
 **Body `POST /api/telemetria/alerta`:**
 
@@ -1165,6 +1417,70 @@ La creación responde:
   "SegundosPermanencia": 45
 }
 ```
+
+Los endpoints `alerta` y `navegacion` se conservan como contratos legacy. La pérdida
+de foco con duración usa un `eventoId` UUID generado por el cliente y un `PUT`
+naturalmente idempotente.
+
+**Inicio de pérdida de foco:**
+
+```json
+{
+  "Tipo": "focus_lost",
+  "FechaInicioCliente": "2026-10-12T10:15:00.000Z"
+}
+```
+
+**Finalización posterior del mismo evento:**
+
+```json
+{
+  "Tipo": "focus_lost",
+  "FechaFinCliente": "2026-10-12T10:15:23.500Z",
+  "DuracionMilisegundos": 23500
+}
+```
+
+También pueden enviarse inicio, fin y duración juntos. Repetir el mismo UUID con los
+mismos datos devuelve el incidente existente sin duplicarlo; reutilizarlo con datos
+incompatibles devuelve `409 FOCUS_EVENT_CONFLICT`.
+
+Reglas:
+
+- El alumno sólo registra eventos de sus propios intentos; la identidad proviene del JWT.
+- Docente y administrador consultan. El docente queda limitado a sus comisiones activas.
+- Se registran timestamps de recepción en el servidor además de los timestamps cliente.
+- Se toleran cinco minutos de diferencia de reloj y hasta siete días desde `FechaFin`
+  para sincronización tardía. Un replay idéntico ya persistido continúa siendo válido.
+- La diferencia entre timestamps y `DuracionMilisegundos` admite hasta dos segundos de
+  desviación por temporizadores del navegador.
+- La pérdida de foco no anula, vence ni finaliza el intento y no crea consecuencias
+  automáticas. Los eventos se conservan aunque otro intento pase a ser el válido.
+- No se almacenan respuestas, tokens ni contenido del examen.
+
+**Resumen docente/admin:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "cantidadPerdidasFoco": 4,
+    "segundosTotalesFuera": 95,
+    "promedioSegundosFuera": 23.75,
+    "maximoSegundosFuera": 41
+  }
+}
+```
+
+`cantidadPerdidasFoco` incluye eventos iniciados y completados. Las métricas de duración
+usan únicamente eventos completados y se expresan en segundos. El listado devuelve los
+timestamps cliente/servidor, duración en milisegundos y estado `iniciado|completado`,
+ordenados por inicio e ID.
+
+Errores funcionales nuevos: `FOCUS_EVENT_INVALID` (400),
+`FOCUS_EVENT_SCOPE_FORBIDDEN` (403), `FOCUS_EVENT_NOT_FOUND` (404),
+`FOCUS_EVENT_CONFLICT`, `FOCUS_EVENT_NOT_STARTED` y
+`FOCUS_EVENT_SYNC_WINDOW_EXPIRED` (409).
 
 ### 4.12 Usuarios
 
@@ -1284,6 +1600,8 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 | `estado` | enum | `borrador`, `publicada` o `archivada`; corresponde a `Actividad.Estado` |
 | `fechaDesde` | ISO 8601 | `Publicacion.FechaInicio >= fechaDesde` |
 | `fechaHasta` | ISO 8601 | `Publicacion.FechaInicio <= fechaHasta` |
+| `alcanceIntentos` | enum, default `todos` | `todos` calcula resultados sobre cada entrega; `validos` usa un único intento académico por alumno/publicación |
+| `conPendientesCorreccion` | boolean | `true` conserva evaluaciones con pendientes; `false`, sólo evaluaciones sin pendientes |
 | `pagina` | entero, default `1` | Mínimo 1 |
 | `limite` | entero, default `20` | Entre 1 y 100 |
 | `ordenarPor` | enum, default `fecha` | `evaluacion`, `fecha`, `promedio`, `entregados`, `aprobacion`, `pendientesCorreccion` |
@@ -1319,26 +1637,35 @@ ser `YYYY-MM-DD` o timestamps ISO 8601; `fechaDesde` no puede superar
 - **Pendiente de corrección:** intento `entregado` con `NotaFinal IS NULL`. Es el
   estado efectivo dejado por finalización cuando existen preguntas abiertas y
   continúa así hasta la asignación de nota final.
-- **Calificado:** intento `entregado` con `NotaFinal IS NOT NULL`.
-- **Promedio:** promedio ponderado por intento calificado, no promedio de
-  promedios por publicación. Sin intentos calificados devuelve `null`.
-- **Aprobado/desaprobado:** intento calificado con `NotaFinal >= 6` o `< 6`.
-  El umbral 6 reutiliza el reporte de rendimiento vigente; no define una nueva
-  regla académica. Existe deuda conocida porque otros cálculos legacy usan 4.
+- **Alcance operativo:** `intentosTotales`, estados y pendientes de corrección
+  siempre cuentan todos los intentos alcanzados, independientemente de
+  `alcanceIntentos`.
+- **Alcance académico:** calificados, promedio, aprobados y desaprobados usan todos
+  los entregados cuando `alcanceIntentos=todos`. Con `validos` usan como máximo un
+  entregado por alumno/publicación: el override manual si existe o, en caso
+  contrario, el último por `FechaFin DESC, NumeroIntento DESC, Id DESC`.
+- **Calificado:** intento académico `entregado` con `NotaFinal IS NOT NULL`.
+- **Promedio por evaluación:** promedio de notas originales de esa actividad; la fila
+  informa `escalaCalificacion` y `notaAprobacion` para interpretarlo. También expone
+  `promedioIntentosCalificadosBase10`.
+- **Promedio global:** promedio ponderado por intento calificado, normalizado a base
+  10 mediante `NotaFinal * 10 / EscalaCalificacion`; no es un promedio de promedios.
+  Sin intentos calificados devuelve `null`.
+- **Aprobado/desaprobado:** compara la nota original con
+  `Actividad.NotaAprobacion`; no usa umbrales hardcodeados.
 - **Tasa de aprobación:** intentos aprobados / intentos calificados × 100. Sin
   denominador devuelve `null`.
 - `en_progreso`, `vencido` y `anulado` se cuentan separadamente. No participan
   en calificados, promedio ni tasa.
 
-No existe una regla canónica que elija mejor, último o primer intento como nota
-académica definitiva. Por eso este contrato no consolida intentos múltiples:
-usa nombres explícitos por intento y expone por separado alumnos distintos que
-iniciaron. Cambiar esta interpretación requiere una decisión funcional futura.
-
 `graficos.distribucionResultados` usa categorías mutuamente excluyentes por
 intento: `Aprobados`, `Desaprobados`, `Pendientes de corrección`, `En progreso`,
 `Vencidos` y `Anulados`. Las dos primeras y la pendiente sólo clasifican
 intentos `entregado`; las restantes corresponden directamente al estado.
+
+El filtro `conPendientesCorreccion` se aplica antes de calcular KPIs, gráficos,
+total y página. Por lo tanto, todos esos bloques describen exactamente el mismo
+conjunto de evaluaciones filtradas.
 
 #### Response
 
@@ -1346,6 +1673,11 @@ intentos `entregado`; las restantes corresponden directamente al estado.
 {
   "success": true,
   "data": {
+    "criterios": {
+      "alcanceIntentos": "todos",
+      "escalaPromedio": 10,
+      "conPendientesCorreccion": null
+    },
     "kpis": {
       "totalEvaluaciones": 12,
       "totalAlumnosAlcanzados": 280,
@@ -1355,9 +1687,11 @@ intentos `entregado`; las restantes corresponden directamente al estado.
       "totalEnProgreso": 15,
       "totalVencidos": 5,
       "totalAnulados": 10,
+      "totalIntentosAlcanceAcademico": 230,
       "totalIntentosCalificados": 210,
       "intentosPendientesCorreccion": 20,
       "promedioIntentosCalificados": 7.15,
+      "promedioIntentosCalificadosBase10": 7.15,
       "tasaAprobacionIntentos": 74.3
     },
     "graficos": {
@@ -1382,6 +1716,8 @@ intentos `entregado`; las restantes corresponden directamente al estado.
         "fechaInicio": "2026-08-01T12:00:00.000Z",
         "fechaFin": "2026-08-01T14:00:00.000Z",
         "estado": "publicada",
+        "escalaCalificacion": 100,
+        "notaAprobacion": 60,
         "alumnosAlcanzados": 30,
         "alumnosQueIniciaron": 28,
         "sinIniciar": 2,
@@ -1390,9 +1726,11 @@ intentos `entregado`; las restantes corresponden directamente al estado.
         "enProgreso": 1,
         "vencidos": 1,
         "anulados": 1,
+        "intentosAlcanceAcademico": 24,
         "intentosCalificados": 24,
         "intentosPendientesCorreccion": 3,
-        "promedioIntentosCalificados": 7.15,
+        "promedioIntentosCalificados": 71.5,
+        "promedioIntentosCalificadosBase10": 7.15,
         "intentosAprobados": 18,
         "intentosDesaprobados": 6,
         "porcentajeAprobacionIntentos": 75.0
@@ -1421,8 +1759,8 @@ Un listado vacío devuelve `200`, `evaluaciones: []`, `total: 0`,
 | 403 | `REPORT_SCOPE_FORBIDDEN` | Identidad docente inválida o filtro explícito fuera de alcance |
 | 500 | `INTERNAL_ERROR` | Error interno sin SQL ni stack |
 
-El endpoint existente `GET /api/reportes/rendimiento` conserva íntegramente su
-contrato.
+El endpoint existente `GET /api/reportes/rendimiento` conserva sus modos y estructura
+general; la interpretación académica configurable se documenta a continuación.
 
 ---
 
@@ -1446,9 +1784,10 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | `idMateria` | `number` | — | Filtrar por materia |
 | `idMateriaDivision` | `number` | — | Filtrar por comisión |
 | `idActividad` | `number` | — | Filtrar por evaluación (solo modo detalle) |
-| `estado` | `enum` | — | `entregado` \| `en_progreso` \| `vencido` |
+| `estado` | `enum` | — | `entregado` \| `en_progreso` \| `vencido` \| `anulado` |
 | `fechaDesde` | `string` (ISO 8601) | — | Filtro por fecha de inicio del intento |
 | `fechaHasta` | `string` (ISO 8601) | — | Filtro por fecha de inicio del intento |
+| `alcanceIntentos` | `enum` | `todos` | `todos` \| `validos`; limita sólo las métricas académicas y, en detalle, los intentos devueltos |
 | `promedioMin` | `number` (0–10) | — | Promedio mínimo (modo listado) |
 | `promedioMax` | `number` (0–10) | — | Promedio máximo (modo listado) |
 | `ordenarPor` | `enum` | `alumno` | `alumno` \| `promedio` \| `aprobados` \| `intentos` |
@@ -1466,6 +1805,13 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 - `limite` entre 1 y 100.
 - Sin `matricula`: devuelve listado paginado con KPIs globales y por alumno.
 - Con `matricula`: devuelve detalle completo con KPIs del alumno y actividades agrupadas.
+- Los contadores operativos conservan todos los intentos. Promedio, corregidos y
+  aprobación usan `alcanceIntentos`.
+- `validos` respeta el override manual y, si no existe, usa el último intento entregado
+  por alumno/publicación con desempate estable.
+- Aprobación compara cada nota con `Actividad.NotaAprobacion`.
+- Los promedios que combinan actividades se normalizan a base 10. Cada actividad
+  conserva su `escalaCalificacion`, `notaAprobacion` y notas originales.
 
 **Response — modo detalle (`?matricula=30500`):**
 
@@ -1480,8 +1826,11 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
     },
     "kpis": {
       "totalIntentos": 5,
+      "intentosAlcanceAcademico": 4,
       "totalCorregidos": 4,
       "promedioGeneral": 7.25,
+      "escalaPromedio": 10,
+      "alcanceIntentos": "todos",
       "aprobados": 3,
       "desaprobados": 1,
       "porcentajeAprobacion": 75.0
@@ -1491,6 +1840,8 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
         "idActividad": 1,
         "titulo": "Parcial I",
         "tipo": "evaluacion",
+        "escalaCalificacion": 10,
+        "notaAprobacion": 6,
         "materia": "Matemática",
         "division": "A",
         "intentos": 2,
@@ -1500,7 +1851,9 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
           "numeroIntento": 2,
           "notaFinal": 8.5,
           "notaAutomatica": null,
-          "fechaFin": "2026-06-20T11:00:00.000Z"
+          "fechaFin": "2026-06-20T11:00:00.000Z",
+          "esIntentoValido": true,
+          "seleccionIntentoValido": "automatica"
         }
       }
     ]
@@ -1524,7 +1877,10 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
       "totalAlumnos": 45,
       "conIntentos": 40,
       "totalIntentos": 180,
+      "intentosAlcanceAcademico": 160,
       "promedioGeneral": 6.8,
+      "escalaPromedio": 10,
+      "alcanceIntentos": "todos",
       "tasaAprobacion": 72.5
     },
     "alumnos": [
@@ -1533,8 +1889,11 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
         "nombre": "Julieta",
         "apellido": "Acosta",
         "totalIntentos": 5,
+        "intentosAlcanceAcademico": 4,
         "totalCorregidos": 4,
         "promedio": 7.25,
+        "escalaPromedio": 10,
+        "alcanceIntentos": "todos",
         "aprobados": 3,
         "desaprobados": 1,
         "porcentajeAprobacion": 75.0
@@ -1619,6 +1978,10 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | `NavegacionSchema` | `IdIntento` | `z.number().int()` | Sí |
 | | `IdPregunta` | `z.number().int()` | Sí |
 | | `SegundosPermanencia` | `z.number().int()` | Sí |
+| `IncidenteFocoSchema` | `Tipo` | literal `focus_lost` | Sí |
+| | `FechaInicioCliente` | timestamp ISO 8601 | Inicio sí; finalización posterior no |
+| | `FechaFinCliente` | timestamp ISO 8601 | No; debe acompañar duración |
+| | `DuracionMilisegundos` | entero seguro no negativo | No; debe acompañar fecha fin |
 | `CalificarSchema` | `notaFinal` | `z.number().min(0).max(10).multipleOf(0.01)` | Sí |
 | `CorregirRespuestaSchema` | `esCorrecta` | `z.boolean().nullable()` | No (puede ser null) |
 | | `comentariosDocente` | `z.string().nullable().optional()` | No |
@@ -1683,8 +2046,8 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (337 tests de referencia actual)
-npx jest --verbose  # Reporte detallado (260 tests)
+npm test            # Suite completa (407 tests de referencia actual)
+npx jest --verbose  # Reporte detallado
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
 ```
@@ -1702,11 +2065,15 @@ tests/
 ├── alumnos.test.ts         ← CRUD, inscripción idempotente, camelCase + estadísticas
 ├── evaluaciones.test.ts    ← Evaluaciones + modificar-completo + preguntas + detalle + alumnos
 ├── intentos.test.ts        ← Intentos, respuestas, reintentos, corrección e historial
+├── intentos-mios.test.ts   ← Historial propio, filtros, resumen, paginación y RBAC
+├── intento-valido.test.ts  ← Selección automática/manual, auditoría, reversión y RBAC
 ├── academico.test.ts       ← Carreras, Materias, Docentes
 ├── actas.test.ts           ← Actas, Detalle, decimales
 ├── health.test.ts          ← Identidad de API, disponibilidad SQL y contrato degradado
 ├── rbac.test.ts            ← checkRole, JWT estricto/legacy, tipos y roles
-└── reportes.test.ts        ← Rendimiento por alumno/evaluación + filtros + paginación global
+├── reportes.test.ts        ← Rendimiento por alumno/evaluación + filtros + paginación global
+├── reportes-calificacion.test.ts ← Escalas, umbrales, alcance válido y pendientes
+└── telemetria-focus.test.ts ← Incidentes idempotentes, duración, resumen, alcance y RBAC
 ```
 
 ### 6.3 Aislamiento
@@ -2059,7 +2426,7 @@ al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
 Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
 
 Validación local de esta entrega: `npm test -- --runInBand` y
-`npx jest --runInBand --detectOpenHandles`, ambos con 16 suites/337 pruebas. El puerto
+`npx jest --runInBand --detectOpenHandles`, ambos con 21 suites/407 pruebas. El puerto
 55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
 global preexistente (`rootDir` sin `include`, y después la incompatibilidad
 NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server

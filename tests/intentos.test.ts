@@ -13,13 +13,37 @@ let alumnoToken: string;
 beforeAll(() => {
   process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
   process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
-  docenteToken = jwt.sign({ id: 1, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
+  docenteToken = jwt.sign({ id: 1, email: 'docente@test.com', role: 'docente', idDocente: 10, idAlumno: null }, process.env.JWT_SECRET);
   alumnoToken = jwt.sign({ id: 2, email: 'alumno@test.com', role: 'alumno', idAlumno: 2, idDocente: null }, process.env.JWT_SECRET);
   app = require('../src/app').app;
 });
 
 afterEach(() => {
   jest.clearAllMocks();
+  mock.transactionRequest.query.mockReset().mockResolvedValue({ recordset: [] });
+  mock.transactionRequest.input.mockReset().mockReturnThis();
+});
+
+const scopeIntento = (overrides: Record<string, unknown> = {}) => ({
+  IdIntento: 1,
+  Estado: 'entregado',
+  EscalaCalificacion: 10,
+  NotaAprobacion: 4,
+  IdDocente: 10,
+  DocenteActivo: true,
+  NotaFinal: null,
+  NotaFinalManual: null,
+  ...overrides,
+});
+
+const scopePregunta = (overrides: Record<string, unknown> = {}) => ({
+  ...scopeIntento(),
+  IdIntentoPregunta: 100,
+  PuntajeMaximoSnapshot: 2,
+  PuntajeMaximoGrupo: 2,
+  PosicionGrupo: 1,
+  TotalGrupos: 5,
+  ...overrides,
 });
 
 describe('POST /api/intentos/iniciar', () => {
@@ -204,12 +228,14 @@ describe('GET /api/intentos/:idIntento/completo', () => {
         recordset: [
           {
             IdIntento: 1, IdAlumno: 30500, IdPublicacion: 5, Estado: 'entregado',
-            NotaFinal: null, NotaAutomatica: 8.00,
+            NotaFinal: null, NotaAutomatica: 2.00, NotaFinalCalculada: null, NotaFinalManual: null,
             FechaInicio: new Date('2026-06-15T10:00:00Z'),
             FechaFin: new Date('2026-06-15T11:30:00Z'),
             NumeroIntento: 1,
             Nombre: 'Julieta', Apellido: 'Acosta', Correo: 'jacosta@test.com',
             TituloEvaluacion: 'Parcial I', TipoEvaluacion: 'evaluacion', DuracionMinutos: 120,
+            EscalaCalificacion: 10, NotaAprobacion: 4,
+            IdDocente: 10, DocenteActivo: true,
           },
         ],
       })
@@ -218,6 +244,9 @@ describe('GET /api/intentos/:idIntento/completo', () => {
           {
             IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc',
             GrupoConceptualmente: 'SQL Básico',
+            PuntajeMaximoSnapshot: 2, PuntajeObtenido: 2, OrigenCorreccion: 'automatica',
+            ComentariosCorreccion: null, CorregidoPor: null,
+            FechaCorreccion: new Date('2026-06-15T11:30:00Z'),
             IdOpcion: 1, OpcionTexto: 'DDL', EsCorrecta: true,
             IdRespuesta: 1, RtaTexto: null,
             FueSeleccionada: 1,
@@ -225,6 +254,9 @@ describe('GET /api/intentos/:idIntento/completo', () => {
           {
             IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc',
             GrupoConceptualmente: 'SQL Básico',
+            PuntajeMaximoSnapshot: 2, PuntajeObtenido: 2, OrigenCorreccion: 'automatica',
+            ComentariosCorreccion: null, CorregidoPor: null,
+            FechaCorreccion: new Date('2026-06-15T11:30:00Z'),
             IdOpcion: 2, OpcionTexto: 'DML', EsCorrecta: false,
             IdRespuesta: 1, RtaTexto: null,
             FueSeleccionada: 0,
@@ -232,6 +264,8 @@ describe('GET /api/intentos/:idIntento/completo', () => {
           {
             IdPregunta: 11, Enunciado: 'Explique normalización', Tipo: 'abierta',
             GrupoConceptualmente: 'Diseño BD',
+            PuntajeMaximoSnapshot: 2, PuntajeObtenido: null, OrigenCorreccion: null,
+            ComentariosCorreccion: null, CorregidoPor: null, FechaCorreccion: null,
             IdOpcion: null, OpcionTexto: null, EsCorrecta: null,
             IdRespuesta: 2, RtaTexto: 'Es un proceso para evitar redundancia',
             FueSeleccionada: 0,
@@ -248,8 +282,14 @@ describe('GET /api/intentos/:idIntento/completo', () => {
     expect(res.body.data.idIntento).toBe(1);
     expect(res.body.data.nombre).toBe('Julieta');
     expect(res.body.data.tituloEvaluacion).toBe('Parcial I');
+    expect(res.body.data).toMatchObject({ escalaCalificacion: 10, notaAprobacion: 4, notaFinalCalculada: null });
     expect(res.body.data.preguntas).toHaveLength(2);
     expect(res.body.data.preguntas[0].idPregunta).toBe(10);
+    expect(res.body.data.preguntas[0]).toMatchObject({
+      puntajeMaximo: 2,
+      puntajeObtenido: 2,
+      origenCorreccion: 'automatica',
+    });
     expect(res.body.data.preguntas[0].respuesta).toBeDefined();
     expect(res.body.data.preguntas[0].respuesta.rtaTexto).toBeNull();
     expect(res.body.data.preguntas[0].opciones).toHaveLength(2);
@@ -291,6 +331,24 @@ describe('GET /api/intentos/:idIntento/completo', () => {
 
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
+  });
+
+  it('retorna 403 cuando el intento pertenece a otra comisión docente', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{
+        IdIntento: 1, IdAlumno: 30500, IdPublicacion: 5, Estado: 'entregado',
+        IdDocente: 99, DocenteActivo: true,
+      }],
+    });
+
+    const res = await request(app)
+      .get('/api/intentos/1/completo')
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ATTEMPT_SCOPE_FORBIDDEN');
+    expect(reqBuilder.query).toHaveBeenCalledTimes(1);
   });
 
   it('retorna 403 cuando alumno intenta ver intento de otro alumno', async () => {
@@ -349,10 +407,9 @@ describe('GET /api/intentos/:idIntento/completo', () => {
 
 describe('PUT /api/intentos/:idIntento/calificar', () => {
   it('retorna 200 al asignar nota a intento entregado', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
-      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'entregado' }] })
-      .mockResolvedValueOnce({});
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeIntento()] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, NotaFinal: 7.5, NotaFinalManual: 7.5, EscalaCalificacion: 10 }] });
 
     const res = await request(app)
       .put('/api/intentos/1/calificar')
@@ -362,13 +419,16 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.message).toBe('Nota asignada correctamente');
+    expect(res.body.data.notaFinalManual).toBe(7.5);
+    const sqlText = mock.transactionRequest.query.mock.calls[1][0];
+    expect(sqlText).toContain('HistorialNotaIntento');
+    expect(sqlText).toContain('NotaFinalManual = @NotaFinal');
   });
 
   it('retorna 200 al calificar intento vencido', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
-      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'vencido' }] })
-      .mockResolvedValueOnce({});
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeIntento({ Estado: 'vencido' })] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, NotaFinal: 4, NotaFinalManual: 4, EscalaCalificacion: 10 }] });
 
     const res = await request(app)
       .put('/api/intentos/1/calificar')
@@ -380,10 +440,9 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
   });
 
   it('retorna 200 al calificar intento anulado', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
-      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'anulado' }] })
-      .mockResolvedValueOnce({});
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeIntento({ Estado: 'anulado' })] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, NotaFinal: 2.5, NotaFinalManual: 2.5, EscalaCalificacion: 10 }] });
 
     const res = await request(app)
       .put('/api/intentos/1/calificar')
@@ -395,9 +454,8 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
   });
 
   it('retorna 400 cuando el intento está en progreso', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
-      .mockResolvedValueOnce({ recordset: [{ Id: 1, Estado: 'en_progreso' }] });
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeIntento({ Estado: 'en_progreso' })] });
 
     const res = await request(app)
       .put('/api/intentos/1/calificar')
@@ -407,11 +465,11 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toBe('No se puede calificar un examen que aún está en progreso.');
+    expect(res.body.code).toBe('ATTEMPT_NOT_DELIVERED');
   });
 
   it('retorna 404 cuando el intento no existe', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({ recordset: [] });
+    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [] });
 
     const res = await request(app)
       .put('/api/intentos/999/calificar')
@@ -423,7 +481,8 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
     expect(res.body.message).toBe('Intento no encontrado');
   });
 
-  it('retorna 400 con nota que excede el rango (11)', async () => {
+  it('retorna 400 con nota que excede la escala real (11 sobre 10)', async () => {
+    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [scopeIntento()] });
     const res = await request(app)
       .put('/api/intentos/1/calificar')
       .set('Authorization', `Bearer ${docenteToken}`)
@@ -431,7 +490,22 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toBe('Datos inválidos');
+    expect(res.body.code).toBe('FINAL_GRADE_OUT_OF_RANGE');
+  });
+
+  it('acepta y audita 100.00 en una evaluación con escala 100', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeIntento({ EscalaCalificacion: 100, NotaAprobacion: 40 })] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, NotaFinal: 100, NotaFinalManual: 100, EscalaCalificacion: 100 }] });
+
+    const res = await request(app)
+      .put('/api/intentos/1/calificar')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ notaFinal: 100 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ notaFinal: 100, notaFinalManual: 100, escalaCalificacion: 100 });
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('NotaFinal', expect.anything(), 100);
   });
 
   it('retorna 400 con nota con más de 2 decimales', async () => {
@@ -465,14 +539,14 @@ describe('PUT /api/intentos/:idIntento/calificar', () => {
 });
 
 describe('PUT /api/intentos/:idIntento/preguntas/:idPregunta/corregir', () => {
-  it('retorna 200 al corregir respuesta exitosamente', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
+  it('mantiene esCorrecta y lo traduce al puntaje máximo', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopePregunta()] })
       .mockResolvedValueOnce({
-        recordset: [{ Estado: 'entregado' }],
-      })
-      .mockResolvedValueOnce({
-        rowsAffected: [1],
+        recordset: [{
+          IdIntento: 1, IdPregunta: 10, PuntajeMaximoSnapshot: 2, PuntajeObtenido: 2,
+          OrigenCorreccion: 'manual', ComentariosDocente: 'Muy bien!', NotaFinalCalculada: 10,
+        }],
       });
 
     const res = await request(app)
@@ -483,12 +557,13 @@ describe('PUT /api/intentos/:idIntento/preguntas/:idPregunta/corregir', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.message).toBe('Respuesta corregida correctamente');
+    expect(res.body.data).toMatchObject({ puntajeMaximoSnapshot: 2, puntajeObtenido: 2, origenCorreccion: 'manual' });
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('PuntajeObtenido', expect.anything(), 2);
   });
 
   it('retorna 400 cuando el intento está en progreso', async () => {
-    const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
-        recordset: [{ Estado: 'en_progreso' }],
+    mock.transactionRequest.query.mockResolvedValueOnce({
+        recordset: [scopePregunta({ Estado: 'en_progreso' })],
     });
 
     const res = await request(app)
@@ -498,6 +573,71 @@ describe('PUT /api/intentos/:idIntento/preguntas/:idPregunta/corregir', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+    expect(res.body.code).toBe('ATTEMPT_NOT_DELIVERED');
+  });
+
+  it('permite modificar una corrección automática con puntaje parcial y la audita', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopePregunta()] })
+      .mockResolvedValueOnce({
+        recordset: [{
+          IdIntento: 1, IdPregunta: 10, PuntajeMaximoSnapshot: 2, PuntajeObtenido: 1.5,
+          OrigenCorreccion: 'manual', ComentariosDocente: 'Parcial', NotaFinalCalculada: 9.5,
+        }],
+      });
+
+    const res = await request(app)
+      .put('/api/intentos/1/preguntas/10/corregir')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ puntajeObtenido: 1.5, comentariosDocente: 'Parcial' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ puntajeObtenido: 1.5, origenCorreccion: 'manual' });
+    const sqlText = mock.transactionRequest.query.mock.calls[1][0];
+    expect(sqlText).toContain('HistorialCorreccionIntentoPregunta');
+    expect(sqlText).toContain("OrigenCorreccion = 'manual'");
+    expect(sqlText).toContain('UPDATE dbo.Respuesta');
+  });
+
+  it('corrige una pregunta omitida porque opera sobre IntentoPregunta', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopePregunta({ PuntajeMaximoSnapshot: 3 })] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, IdPregunta: 10, PuntajeObtenido: 0, OrigenCorreccion: 'manual' }] });
+
+    const res = await request(app)
+      .put('/api/intentos/1/preguntas/10/corregir')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ puntajeObtenido: 0, comentariosDocente: 'Sin respuesta' });
+
+    expect(res.status).toBe(200);
+    expect(mock.transactionRequest.query.mock.calls[0][0]).toContain('LEFT JOIN dbo.IntentoPregunta');
+    expect(mock.transactionRequest.query.mock.calls[1][0]).toContain('UPDATE dbo.IntentoPregunta');
+  });
+
+  it('rechaza un puntaje superior al máximo de la pregunta', async () => {
+    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [scopePregunta({ PuntajeMaximoSnapshot: 2 })] });
+
+    const res = await request(app)
+      .put('/api/intentos/1/preguntas/10/corregir')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ puntajeObtenido: 2.01 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('QUESTION_SCORE_OUT_OF_RANGE');
+    const transaction = (mock.pool.Transaction as jest.Mock).mock.results.at(-1)?.value;
+    expect(transaction.rollback).toHaveBeenCalled();
+  });
+
+  it('impide corregir un intento de otra comisión', async () => {
+    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [scopePregunta({ IdDocente: 99 })] });
+
+    const res = await request(app)
+      .put('/api/intentos/1/preguntas/10/corregir')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ puntajeObtenido: 1 });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ATTEMPT_SCOPE_FORBIDDEN');
   });
 });
 

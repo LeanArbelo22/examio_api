@@ -66,7 +66,9 @@ beforeEach(() => {
     if (sql.includes('SELECT Id FROM dbo.BancoEtiqueta')) return result([]);
     if (sql.includes('SELECT Id,TituloReferencia FROM dbo.GrupoPregunta')) return result([{ Id: 1, TituloReferencia: 'Original' }]);
     if (sql.includes('SELECT Id FROM dbo.Pregunta WHERE IdGrupoPregunta')) return result([{ Id: 1 }]);
-    if (sql.includes('SELECT p.Id,p.Enunciado,p.Tipo,g.TituloReferencia')) return result([{ Id: p.Id, Enunciado: 'Original', Tipo: 'mc', TituloReferencia: 'Original' }]);
+    if (sql.includes('SELECT p.Id,p.Enunciado,p.Tipo,p.ModoJustificacion')) return result([{ Id: p.Id, Enunciado: 'Original', Tipo: 'mc',
+      ModoJustificacion: 'sin_justificacion', EstrategiaCorreccion: 'exacta', TratamientoJustificacion: 'informativa',
+      TituloReferencia: 'Original' }]);
     if (sql.includes('SELECT Texto,EsCorrecta FROM dbo.Opcion')) return result(opciones);
     if (sql.includes('FROM dbo.OperacionIdempotente WITH')) {
       const stored = operacionesIdempotentes.get(`${p.Actor}|${p.Operacion}|${p.Clave}`);
@@ -86,12 +88,16 @@ beforeEach(() => {
     if (sql.startsWith('INSERT INTO dbo.Publicacion')) return result([{ Id: 2 }]);
     if (sql.startsWith('UPDATE dbo.Actividad SET Revision=Revision+1')) return result([{ Revision: 2 }]);
     if (sql.startsWith('INSERT INTO dbo.BancoPregunta')) {
-      pregunta = { Id: 10, IdDocente: p.Docente, Titulo: p.Titulo, Tipo: p.Tipo, Enunciado: p.Enunciado, Estado: p.Estado, Revision: 1 };
+      pregunta = { Id: 10, IdDocente: p.Docente, Titulo: p.Titulo, Tipo: p.Tipo, Enunciado: p.Enunciado,
+        ModoJustificacion: p.Justificacion, EstrategiaCorreccion: p.Estrategia,
+        TratamientoJustificacion: p.Tratamiento, Estado: p.Estado, Revision: 1 };
       opciones = []; return result([{ Id: 10 }]);
     }
     if (sql.startsWith('UPDATE dbo.BancoPregunta')) {
       pregunta = { ...pregunta, Estado: p.Estado, Revision: pregunta.Revision + 1,
-        ...(sql.includes('Titulo=@Titulo') ? { Titulo: p.Titulo, Tipo: p.Tipo, Enunciado: p.Enunciado } : {}) };
+        ...(sql.includes('Titulo=@Titulo') ? { Titulo: p.Titulo, Tipo: p.Tipo, Enunciado: p.Enunciado,
+          ModoJustificacion: p.Justificacion, EstrategiaCorreccion: p.Estrategia,
+          TratamientoJustificacion: p.Tratamiento } : {}) };
       return result();
     }
     if (sql.startsWith('DELETE FROM dbo.BancoOpcion')) { opciones = []; return result(); }
@@ -207,6 +213,41 @@ describe('Contenido y revisiones', () => {
   it('crea pregunta disponible con opciones', async () => {
     const r = await auth(request(app).post(`${base}/preguntas`)).send(input);
     expect(r.status).toBe(201); expect(r.body.data.opciones).toHaveLength(2);
+    expect(r.body.data).toMatchObject({ modoJustificacion: 'sin_justificacion', estrategiaCorreccion: 'exacta',
+      tratamientoJustificacion: 'informativa' });
+    expect(writes.some(sql => sql.includes('SET ContenidoHash=CONVERT'))).toBe(true);
+  });
+  it('crea selección múltiple con justificación y corrección parcial', async () => {
+    const r = await auth(request(app).post(`${base}/preguntas`)).send({
+      ...input,
+      Tipo: 'multiple',
+      ModoJustificacion: 'obligatoria',
+      EstrategiaCorreccion: 'parcial_penalizada',
+      TratamientoJustificacion: 'revision_manual',
+      Opciones: [
+        { Texto: 'TCP', EsCorrecta: true },
+        { Texto: 'UDP', EsCorrecta: true },
+        { Texto: 'RAM', EsCorrecta: false },
+      ],
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.data).toMatchObject({ tipo: 'multiple', modoJustificacion: 'obligatoria',
+      estrategiaCorreccion: 'parcial_penalizada', tratamientoJustificacion: 'revision_manual' });
+    expect(r.body.data.opciones).toHaveLength(3);
+  });
+  it('rechaza estrategias parciales fuera de selección múltiple', async () => {
+    const r = await auth(request(app).post(`${base}/preguntas`)).send({
+      ...input, EstrategiaCorreccion: 'parcial_sin_penalizacion',
+    });
+    expect(r.status).toBe(400); expect(r.body.code).toBe('REQUEST_INVALID');
+    expect(escriturasDominio()).toHaveLength(0);
+  });
+  it('rechaza revisión manual cuando no se solicita justificación', async () => {
+    const r = await auth(request(app).post(`${base}/preguntas`)).send({
+      ...input, TratamientoJustificacion: 'revision_manual',
+    });
+    expect(r.status).toBe(400); expect(r.body.code).toBe('REQUEST_INVALID');
+    expect(escriturasDominio()).toHaveLength(0);
   });
   it('rechaza claves de corrección ambiguas', async () => {
     const r = await auth(request(app).post(`${base}/preguntas`)).send({ ...input, Opciones: input.Opciones.map(o => ({ ...o, EsCorrecta: true })) });

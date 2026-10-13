@@ -10,6 +10,7 @@ import { responderErrorBanco } from './banco.controller';
 import { completarIdempotencia, iniciarIdempotencia } from '../services/idempotency.service';
 import { crearEvaluacion, modificarBorrador, publicarBorrador } from '../services/evaluacion-write.service';
 import { eliminarSeleccionIntentoValido, listarIntentosPublicacion, seleccionarIntentoValido } from '../services/intento-valido.service';
+import { autorizarAccesoIntento } from '../services/intento-respuesta.service';
 
 function obtenerIdempotencyKey(req: Request) {
   const parsed = IdempotencyKeySchema.safeParse(req.header('Idempotency-Key'));
@@ -62,14 +63,37 @@ export const publicarEvaluacionCompleta = async (req: Request, res: Response) =>
 
 export const obtenerExamenSorteado = async (req: Request, res: Response) => {
   try {
+    const idIntento = IdBancoSchema.parse(req.params.idIntento);
+    await autorizarAccesoIntento((req as Request & { user: ActorBanco }).user, idIntento);
     const result = await pool.request()
-      .input('IdIntento', sql.Int, req.params.idIntento)
+      .input('IdIntento', sql.Int, idIntento)
       .execute('SP_Intento_ObtenerExamenDinamico');
     const data = result.recordset.map((row: any) => {
       const mapped = mapKeysToCamelCase(row) as Record<string, unknown>;
       const mostrarPuntaje = Boolean(row.MostrarPuntajePorPregunta);
       delete mapped.mostrarPuntajePorPregunta;
       if (!mostrarPuntaje) delete mapped.puntajeMaximo;
+      if (row.IdRespuesta != null) {
+        let idsOpcionesSeleccionadas: number[] = [];
+        if (typeof row.OpcionesSeleccionadasJson === 'string') {
+          try {
+            idsOpcionesSeleccionadas = (JSON.parse(row.OpcionesSeleccionadasJson) as Array<{ idOpcion: number }>)
+              .map(item => Number(item.idOpcion));
+          } catch { idsOpcionesSeleccionadas = []; }
+        }
+        mapped.respuesta = {
+          idRespuesta: row.IdRespuesta,
+          idsOpcionesSeleccionadas,
+          rtaTexto: row.RtaTexto ?? null,
+          justificacion: row.Justificacion ?? null,
+          revision: Number(row.Revision ?? 0),
+        };
+      } else mapped.respuesta = null;
+      delete mapped.idRespuesta;
+      delete mapped.opcionesSeleccionadasJson;
+      delete mapped.rtaTexto;
+      delete mapped.justificacion;
+      delete mapped.revision;
       return mapped;
     });
     res.json({ success: true, data });
@@ -81,15 +105,18 @@ export const obtenerExamenSorteado = async (req: Request, res: Response) => {
 
 export const obtenerOpcionesPregunta = async (req: Request, res: Response) => {
   try {
+    const actor = (req as Request & { user: ActorBanco }).user;
+    const idIntento = IdBancoSchema.parse(req.params.idIntento);
+    const idPregunta = IdBancoSchema.parse(req.params.idPregunta);
+    await autorizarAccesoIntento(actor, idIntento);
     const result = await pool.request()
-      .input('IdPregunta', sql.Int, req.params.idPregunta)
-      .input('IdIntento', sql.Int, req.params.idIntento)
+      .input('IdPregunta', sql.Int, idPregunta)
+      .input('IdIntento', sql.Int, idIntento)
       .execute('SP_Pregunta_ObtenerOpciones');
-    res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+    const data = mapKeysToCamelCase(result.recordset) as Array<Record<string, unknown>>;
+    if (actor.role === 'alumno') data.forEach(option => delete option.esCorrecta);
+    res.json({ success: true, data });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const actualizarEstadoEvaluacion = async (req: Request, res: Response) => {
@@ -242,7 +269,8 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
                  ELSE GP.PuntajeMaximo END AS decimal(5,2)) AS PuntajeMaximo,
                GP.IdBancoGrupoOrigen, GP.RevisionBancoOrigen AS RevisionGrupoBancoOrigen,
                GP.FechaIncorporacionBanco AS FechaGrupoIncorporacionBanco,
-               PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,
+               PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,PR.ModoJustificacion,
+               PR.EstrategiaCorreccion,PR.TratamientoJustificacion,PR.ContenidoHash,
                PR.IdBancoPreguntaOrigen, PR.RevisionBancoOrigen AS RevisionPreguntaBancoOrigen,
                PR.FechaIncorporacionBanco AS FechaPreguntaIncorporacionBanco,
                O.Id AS IdOpcion, O.Texto, O.EsCorrecta
@@ -275,6 +303,10 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
           idPregunta: row.IdPregunta,
           enunciado: row.Enunciado,
           tipo: row.Tipo,
+          modoJustificacion: row.ModoJustificacion,
+          estrategiaCorreccion: row.EstrategiaCorreccion,
+          tratamientoJustificacion: row.TratamientoJustificacion,
+          contenidoHash: row.ContenidoHash,
           idBancoPreguntaOrigen: row.IdBancoPreguntaOrigen,
           revisionBancoOrigen: row.RevisionPreguntaBancoOrigen,
           fechaIncorporacionBanco: row.FechaPreguntaIncorporacionBanco,

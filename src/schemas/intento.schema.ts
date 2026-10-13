@@ -15,7 +15,31 @@ export const GuardarRespuestaSchema = z.object({
   IdIntento: z.number().int(),
   IdPregunta: z.number().int(),
   IdOpcionNueva: z.number().int().optional().nullable(),
+  IdOpcionesSeleccionadas: z.array(z.number().int().positive()).max(100).optional(),
   RtaTexto: z.string().optional().nullable(),
+  Justificacion: z.string().max(10000).optional().nullable(),
+  RevisionEsperada: z.number().int().min(0).optional(),
+  EventoId: z.string().uuid().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.IdOpcionNueva !== undefined && value.IdOpcionesSeleccionadas !== undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['IdOpcionesSeleccionadas'],
+      message: 'Usar IdOpcionNueva o IdOpcionesSeleccionadas, no ambos',
+    });
+  }
+  if ((value.EventoId === undefined) !== (value.RevisionEsperada === undefined)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['EventoId'],
+      message: 'EventoId y RevisionEsperada deben enviarse juntos',
+    });
+  }
+  const tieneCambio = value.IdOpcionNueva !== undefined || value.IdOpcionesSeleccionadas !== undefined ||
+    value.RtaTexto !== undefined || value.Justificacion !== undefined;
+  if (!tieneCambio) {
+    ctx.addIssue({ code: 'custom', path: [], message: 'Debe indicarse el contenido de la respuesta' });
+  }
 });
 
 export const CalificarSchema = z.object({

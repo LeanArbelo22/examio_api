@@ -10,6 +10,7 @@ import {
   puntajeSql,
   resolverConfiguracionCalificacion,
 } from './evaluacion-scoring.service';
+import { actualizarContenidoHash } from './pregunta-content.service';
 
 async function referenciaBanco(db: DbBanco, actor: ActorBanco, recurso: 'preguntas'|'grupos', referencia: any) {
   if (!referencia) return undefined;
@@ -32,14 +33,18 @@ async function insertarEstructura(db: DbBanco, actor: ActorBanco, actividad: num
     for (const pregunta of grupo.Variantes) {
       const refPregunta = await referenciaBanco(db, actor, 'preguntas', pregunta.ReferenciaBanco);
       const p = (await consultar(db, `INSERT INTO dbo.Pregunta
-        (IdGrupoPregunta,Enunciado,Tipo,IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
-        OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Banco,@Revision,
+        (IdGrupoPregunta,Enunciado,Tipo,ModoJustificacion,EstrategiaCorreccion,TratamientoJustificacion,
+         IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
+        OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Justificacion,@Estrategia,@Tratamiento,@Banco,@Revision,
         CASE WHEN @Banco IS NULL THEN NULL ELSE SYSUTCDATETIME() END)`,
       { Grupo: row.Id, Enunciado: pregunta.Enunciado, Tipo: pregunta.Tipo,
+        Justificacion: pregunta.ModoJustificacion, Estrategia: pregunta.EstrategiaCorreccion,
+        Tratamiento: pregunta.TratamientoJustificacion,
         Banco: refPregunta?.Id ?? null, Revision: refPregunta?.Revision ?? null })).recordset[0];
       for (const opcion of pregunta.Opciones ?? []) await consultar(db,
         'INSERT INTO dbo.Opcion(IdPregunta,Texto,EsCorrecta) VALUES(@Pregunta,@Texto,@Correcta)',
         { Pregunta: p.Id, Texto: opcion.Texto, Correcta: opcion.EsCorrecta });
+      await actualizarContenidoHash(db, 'evaluacion', p.Id);
     }
   }
 }
@@ -124,18 +129,24 @@ async function reemplazarEstructura(db: DbBanco, actor: ActorBanco, actividad: n
         const referencia = pregunta.ReferenciaBanco
           ? await referenciaBanco(db, actor, 'preguntas', pregunta.ReferenciaBanco) : undefined;
         await consultar(db, `UPDATE dbo.Pregunta SET Enunciado=@Enunciado,Tipo=@Tipo,
+          ModoJustificacion=@Justificacion,EstrategiaCorreccion=@Estrategia,TratamientoJustificacion=@Tratamiento,
           IdBancoPreguntaOrigen=COALESCE(IdBancoPreguntaOrigen,@Banco),
           RevisionBancoOrigen=CASE WHEN IdBancoPreguntaOrigen IS NULL THEN @Revision ELSE RevisionBancoOrigen END,
           FechaIncorporacionBanco=CASE WHEN IdBancoPreguntaOrigen IS NULL AND @Banco IS NOT NULL THEN SYSUTCDATETIME() ELSE FechaIncorporacionBanco END
           WHERE Id=@Id`, { Id: idPregunta, Enunciado: pregunta.Enunciado, Tipo: pregunta.Tipo,
+          Justificacion: pregunta.ModoJustificacion, Estrategia: pregunta.EstrategiaCorreccion,
+          Tratamiento: pregunta.TratamientoJustificacion,
           Banco: referencia?.Id ?? null, Revision: referencia?.Revision ?? null });
       } else {
         const referencia = await referenciaBanco(db, actor, 'preguntas', pregunta.ReferenciaBanco);
         idPregunta = (await consultar(db, `INSERT INTO dbo.Pregunta
-          (IdGrupoPregunta,Enunciado,Tipo,IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
-          OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Banco,@Revision,
+          (IdGrupoPregunta,Enunciado,Tipo,ModoJustificacion,EstrategiaCorreccion,TratamientoJustificacion,
+           IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
+          OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Justificacion,@Estrategia,@Tratamiento,@Banco,@Revision,
           CASE WHEN @Banco IS NULL THEN NULL ELSE SYSUTCDATETIME() END)`,
         { Grupo: idGrupo, Enunciado: pregunta.Enunciado, Tipo: pregunta.Tipo,
+          Justificacion: pregunta.ModoJustificacion, Estrategia: pregunta.EstrategiaCorreccion,
+          Tratamiento: pregunta.TratamientoJustificacion,
           Banco: referencia?.Id ?? null, Revision: referencia?.Revision ?? null })).recordset[0].Id;
       }
 
@@ -148,6 +159,7 @@ async function reemplazarEstructura(db: DbBanco, actor: ActorBanco, actividad: n
         else await consultar(db, 'INSERT INTO dbo.Opcion(IdPregunta,Texto,EsCorrecta) VALUES(@Pregunta,@Texto,@Correcta)',
           { Pregunta: idPregunta, Texto: opcion.Texto, Correcta: opcion.EsCorrecta });
       }
+      await actualizarContenidoHash(db, 'evaluacion', idPregunta);
     }
   }
 }
@@ -203,7 +215,8 @@ export async function validarActividadPublicable(db: DbBanco, actividad: number)
   materializarPuntajes(grupos, configuracion, configuracion.ModoPuntaje === 'personalizados');
   for (const grupo of grupos) {
     if (!grupo.TituloReferencia?.trim()) throw new BancoError(400, 'Los grupos requieren título', 'DRAFT_NOT_PUBLISHABLE');
-    const preguntas = (await consultar(db, 'SELECT Id,Enunciado,Tipo FROM dbo.Pregunta WHERE IdGrupoPregunta=@Id ORDER BY Id', { Id: grupo.Id })).recordset;
+    const preguntas = (await consultar(db, `SELECT Id,Enunciado,Tipo,ModoJustificacion,EstrategiaCorreccion,
+      TratamientoJustificacion FROM dbo.Pregunta WHERE IdGrupoPregunta=@Id ORDER BY Id`, { Id: grupo.Id })).recordset;
     if (!preguntas.length) throw new BancoError(400, 'Cada grupo requiere al menos una variante', 'DRAFT_NOT_PUBLISHABLE');
     for (const pregunta of preguntas) {
       if (!pregunta.Enunciado?.trim()) throw new BancoError(400, 'Las preguntas requieren enunciado', 'DRAFT_NOT_PUBLISHABLE');
@@ -216,6 +229,9 @@ export async function validarActividadPublicable(db: DbBanco, actividad: number)
         if (opciones.length !== 2 || !textos.includes('verdadero') || !textos.includes('falso') || correctas !== 1)
           throw new BancoError(400, 'Pregunta vf incompleta', 'DRAFT_NOT_PUBLISHABLE');
       }
+      if (pregunta.Tipo === 'multiple' && (
+        opciones.length < 2 || opciones.some((o: any) => !o.Texto?.trim()) || correctas < 1
+      )) throw new BancoError(400, 'Pregunta multiple incompleta', 'DRAFT_NOT_PUBLISHABLE');
       if ((pregunta.Tipo === 'abierta' || pregunta.Tipo === 'code') && opciones.length)
         throw new BancoError(400, 'Pregunta manual con opciones', 'DRAFT_NOT_PUBLISHABLE');
     }

@@ -103,7 +103,7 @@ Las máquinas de estado son el núcleo de la integridad académica de EXAMIO. Ca
 | `en_progreso` | El alumno inició el examen. Puede guardar respuestas, cambiar opciones y navegar entre preguntas. El temporizador corre.                                                                             |
 | `entregado`   | El alumno finalizó explícitamente (`POST /api/intentos/:id/finalizar`). Se calculó `NotaAutomatica`. Si hay preguntas abiertas, `NotaFinal` queda `NULL` pendiente de corrección manual del docente. |
 | `vencido`     | El tiempo máximo (`DuracionMinutos`) se agotó automáticamente. **No implementado** en la lógica actual; reservado para uso futuro.                                                                   |
-| `anulado`     | Anulación manual por administrador/docente. **No implementado** como endpoint; reservado para uso futuro.                                                                                            |
+| `anulado`     | Anulación autoritativa de un intento en progreso vinculada a un incidente registrado. Conserva las respuestas y no publica nota. La anulación manual docente general continúa pendiente.             |
 
 #### Diagrama de transiciones
 
@@ -117,7 +117,7 @@ Las máquinas de estado son el núcleo de la integridad académica de EXAMIO. Ca
                     │en_progreso │
                     └─────┬──────┘
                      ┌────┴────┐
-                     │         │ (reservado)
+                     │         │ PUT anular-por-incidente
                      ▼         ▼
                ┌──────────┐  ┌────────┐
                │ entregado│  │ anulado │
@@ -135,7 +135,7 @@ Las máquinas de estado son el núcleo de la integridad académica de EXAMIO. Ca
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------- |
 | — → `en_progreso`           | Alumno inicia examen. El SP congela variantes y retorna `IdIntento`. Idempotente: si ya hay un intento en progreso, retorna el mismo.                | `POST /api/intentos/iniciar`       | `IniciarExamenSchema` |
 | `en_progreso` → `entregado` | Alumno finaliza explícitamente. El SP calcula `NotaAutomatica` y decide `NotaFinal` según composición del examen. Idempotente.                       | `POST /api/intentos/:id/finalizar` | —                     |
-| `en_progreso` → `anulado`   | **No implementado.** Telemetría registra alertas e incidentes de foco, pero no aplica consecuencias automáticas.                                | —                                  | —                     |
+| `en_progreso` → `anulado`   | El alumno titular o administrador solicita la consecuencia con un `EventoId` elegible ya registrado. La operación es idempotente y auditada. | `PUT /api/intentos/:idIntento/anular-por-incidente/:eventoId` | — |
 | `en_progreso` → `vencido`   | **No implementado.** (Reservado para timeout automático.)                                                                                            | —                                  | —                     |
 
 **Body `POST /api/intentos/iniciar`:**
@@ -151,10 +151,10 @@ Las máquinas de estado son el núcleo de la integridad académica de EXAMIO. Ca
 
 | Estado        | Guardar respuesta | Calificar docente | Corregir pregunta | Ver radiografía      | Reintentar                                        |
 | ------------- | ----------------- | ----------------- | ----------------- | -------------------- | ------------------------------------------------- |
-| `en_progreso` | ✅                | ❌ (400)          | ❌ (400)          | ❌ (no implementado) | —                                                 |
-| `entregado`   | ❌                | ✅                | ✅                | ✅ (solo dueño)      | Si `intentosRealizados < cantidadIntentosMaximos` |
-| `vencido`     | ❌                | ✅                | ✅                | ✅                   | Depende de configuración                          |
-| `anulado`     | ❌                | ✅                | ✅                | ✅                   | No                                                |
+| `en_progreso` | ✅                | ❌ (400)          | ❌ (400)          | ❌                   | —                                                 |
+| `entregado`   | ❌                | ✅                | ✅                | Sólo con corrección confirmada | Si `intentosRealizados < cantidadIntentosMaximos` |
+| `vencido`     | ❌                | ✅                | ✅                | ❌ para alumno       | Depende de configuración                          |
+| `anulado`     | ❌                | ✅                | ✅                | ❌ para alumno       | No                                                |
 
 ##### Cálculo de nota al entregar
 
@@ -419,8 +419,8 @@ La API Node podría exponer un endpoint `/api/intentos/vencer` (protegido para `
 ### Brecha 2 — Falta de Endpoint para Anulación Manual por el Docente
 
 **Problema:**
-El estado `anulado` está reservado, pero telemetría no lo asigna automáticamente. Los
-endpoints de alertas e incidentes sólo registran evidencia para auditoría. Tampoco existe
+Existe una anulación autoritativa solicitada por el alumno y vinculada a un incidente,
+pero registrar telemetría por sí solo continúa sin cambiar el estado. Todavía no existe
 un mecanismo en la API para que un docente pueda anular un examen manualmente por un
 criterio externo (por ejemplo, comportamiento sospechoso en el aula presencial).
 

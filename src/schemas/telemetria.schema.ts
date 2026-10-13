@@ -19,7 +19,7 @@ const fechaCliente = z.string().refine(
 );
 
 export const IncidenteFocoSchema = z.object({
-  Tipo: z.literal('focus_lost'),
+  Tipo: z.enum(['focus_lost', 'fullscreen_exit']),
   FechaInicioCliente: fechaCliente.optional(),
   FechaFinCliente: fechaCliente.optional(),
   DuracionMilisegundos: z.number().int().nonnegative().safe().optional(),

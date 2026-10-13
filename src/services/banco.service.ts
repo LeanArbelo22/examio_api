@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ListaBancoSchema, PreguntaBancoInput, GrupoBancoInput } from '../schemas/banco.schema';
 import { BancoError, DbBanco, consultar, validarDisponible, verificarRevision } from './banco-common.service';
+import { actualizarContenidoHash } from './pregunta-content.service';
 
 export type RecursoBanco = 'preguntas' | 'grupos';
 const tablas = { preguntas: 'BancoPregunta', grupos: 'BancoGrupo' } as const;
@@ -63,18 +64,23 @@ export async function guardarPregunta(db: DbBanco, docente: number, input: Pregu
   if (id) verificarRevision((await detalleBanco(db, 'preguntas', id, docente)).Revision, revision!);
   if (input.Estado === 'disponible') validarDisponible(input);
   await comprobarEtiquetas(db, docente, input.Etiquetas);
-  const args = { Docente: docente, Titulo: input.Titulo, Enunciado: input.Enunciado, Tipo: input.Tipo, Estado: input.Estado };
+  const args = { Docente: docente, Titulo: input.Titulo, Enunciado: input.Enunciado, Tipo: input.Tipo, Estado: input.Estado,
+    Justificacion: input.ModoJustificacion, Estrategia: input.EstrategiaCorreccion,
+    Tratamiento: input.TratamientoJustificacion };
   if (id) {
     await consultar(db, `UPDATE dbo.BancoPregunta SET Titulo=@Titulo,Enunciado=@Enunciado,Tipo=@Tipo,Estado=@Estado,
+      ModoJustificacion=@Justificacion,EstrategiaCorreccion=@Estrategia,TratamientoJustificacion=@Tratamiento,
       Revision=Revision+1,FechaActualizacion=SYSUTCDATETIME() WHERE Id=@Id AND IdDocente=@Docente AND Revision=@Revision`, { ...args, Id: id, Revision: revision! });
     await consultar(db, 'DELETE FROM dbo.BancoOpcion WHERE IdPregunta=@Id', { Id: id });
   } else {
-    id = (await consultar(db, `INSERT INTO dbo.BancoPregunta(IdDocente,Titulo,Enunciado,Tipo,Estado)
-      OUTPUT inserted.Id VALUES(@Docente,@Titulo,@Enunciado,@Tipo,@Estado)`, args)).recordset[0].Id;
+    id = (await consultar(db, `INSERT INTO dbo.BancoPregunta(IdDocente,Titulo,Enunciado,Tipo,Estado,
+      ModoJustificacion,EstrategiaCorreccion,TratamientoJustificacion)
+      OUTPUT inserted.Id VALUES(@Docente,@Titulo,@Enunciado,@Tipo,@Estado,@Justificacion,@Estrategia,@Tratamiento)`, args)).recordset[0].Id;
   }
   for (const [pos, op] of input.Opciones.entries()) await consultar(db,
     'INSERT INTO dbo.BancoOpcion(IdPregunta,Texto,EsCorrecta,Posicion) VALUES(@Id,@Texto,@Correcta,@Pos)',
     { Id: id!, Texto: op.Texto, Correcta: op.EsCorrecta, Pos: pos+1 });
+  await actualizarContenidoHash(db, 'banco', id!);
   await guardarEtiquetas(db, 'preguntas', id!, docente, input.Etiquetas);
   const afectados = input.Estado !== 'disponible' ? await retirarGrupos(db, id!) : [];
   return { ...(await detalleBanco(db, 'preguntas', id!, docente)), GruposAfectados: afectados };

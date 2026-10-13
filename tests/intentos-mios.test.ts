@@ -34,6 +34,9 @@ const item = (overrides: Record<string, unknown> = {}) => ({
   NotaAprobacion: 40,
   Resultado: 'aprobado',
   EstadoCorreccion: 'completa',
+  CorreccionConfirmada: true,
+  CorreccionPendiente: false,
+  RevisionDisponible: true,
   EsIntentoValido: true,
   SeleccionIntentoValido: 'automatica',
   ...overrides,
@@ -90,6 +93,9 @@ describe('GET /api/intentos/mios', () => {
       resultado: 'aprobado',
       esIntentoValido: true,
       seleccionIntentoValido: 'automatica',
+      correccionConfirmada: true,
+      correccionPendiente: false,
+      revisionDisponible: true,
     });
     expect(res.body.data.resumen).toEqual({
       totalIntentos: 12,

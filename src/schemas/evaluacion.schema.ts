@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import { ImportacionesBancoSchema } from './banco.schema';
+import {
+  ConfiguracionPreguntaSchema,
+  TipoPreguntaSchema,
+  validarConfiguracionPregunta,
+} from './pregunta.schema';
 
 const id = z.number().int().positive().max(2147483647);
 const tipo = z.enum(['evaluacion', 'tp', 'tarea']);
-const tipoPregunta = z.enum(['mc', 'vf', 'abierta', 'code']);
 // Los rangos y códigos funcionales estables se resuelven en el service.
 const escalaCalificacion = z.number();
 const nota = z.number();
@@ -15,9 +19,10 @@ const OpcionBorradorSchema = z.object({
   Id: id.optional(), Texto: z.string().max(500).default(''), EsCorrecta: z.boolean().default(false),
 }).strict();
 const VarianteBorradorSchema = z.object({
-  Id: id.optional(), Enunciado: z.string().max(100000).default(''), Tipo: tipoPregunta.default('mc'),
+  Id: id.optional(), Enunciado: z.string().max(100000).default(''), Tipo: TipoPreguntaSchema.default('mc'),
+  ...ConfiguracionPreguntaSchema,
   ReferenciaBanco: referenciaPregunta.optional(), Opciones: z.array(OpcionBorradorSchema).max(100).default([]),
-}).strict();
+}).strict().superRefine(validarConfiguracionPregunta);
 const GrupoBorradorSchema = z.object({
   Id: id.optional(), TituloReferencia: z.string().max(150).default(''),
   PuntajeMaximo: nota.optional().nullable(),
@@ -28,9 +33,11 @@ const OpcionPublicableSchema = z.object({
   Id: id.optional(), Texto: z.string().trim().min(1).max(500), EsCorrecta: z.boolean(),
 }).strict();
 const VariantePublicableSchema = z.object({
-  Id: id.optional(), Enunciado: z.string().trim().min(1).max(100000), Tipo: tipoPregunta,
+  Id: id.optional(), Enunciado: z.string().trim().min(1).max(100000), Tipo: TipoPreguntaSchema,
+  ...ConfiguracionPreguntaSchema,
   ReferenciaBanco: referenciaPregunta.optional(), Opciones: z.array(OpcionPublicableSchema).max(100).default([]),
 }).strict().superRefine((value, ctx) => {
+  validarConfiguracionPregunta(value, ctx);
   const correctas = value.Opciones.filter(o => o.EsCorrecta).length;
   if (value.Tipo === 'mc' && (value.Opciones.length < 2 || correctas !== 1))
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['Opciones'], message: 'mc requiere al menos dos opciones y exactamente una correcta' });
@@ -40,6 +47,8 @@ const VariantePublicableSchema = z.object({
         !textos.includes('falso') || correctas !== 1)
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['Opciones'], message: 'vf requiere exactamente Verdadero y Falso y una correcta' });
   }
+  if (value.Tipo === 'multiple' && (value.Opciones.length < 2 || correctas < 1))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['Opciones'], message: 'multiple requiere al menos dos opciones y al menos una correcta' });
   if ((value.Tipo === 'abierta' || value.Tipo === 'code') && value.Opciones.length)
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['Opciones'], message: `${value.Tipo} no admite opciones` });
 });

@@ -1,19 +1,27 @@
 import { z } from 'zod';
+import {
+  ConfiguracionPreguntaSchema,
+  TipoPreguntaSchema,
+  validarConfiguracionPregunta,
+} from './pregunta.schema';
 
 export const IdBancoSchema = z.coerce.number().int().positive().max(2147483647);
 const id = z.number().int().positive().max(2147483647);
 export const EstadoBancoSchema = z.enum(['borrador', 'disponible', 'archivado']);
-export const TipoBancoSchema = z.enum(['mc', 'vf', 'abierta', 'code']);
+export const TipoBancoSchema = TipoPreguntaSchema;
 const ids = z.array(id).max(200).refine(a => new Set(a).size === a.length, 'IDs repetidos');
 const opciones = z.array(z.object({ Texto: z.string().max(500), EsCorrecta: z.boolean() }).strict()).max(100);
 export const IdempotencyKeySchema = z.string().uuid();
 
-export const PreguntaBancoSchema = z.object({
+const PreguntaBancoBaseSchema = z.object({
   Titulo: z.string().trim().min(1).max(150), Enunciado: z.string().max(100000).default(''),
   Tipo: TipoBancoSchema, Estado: EstadoBancoSchema.default('borrador'),
+  ...ConfiguracionPreguntaSchema,
   Opciones: opciones.default([]), Etiquetas: ids.default([]),
 }).strict();
-export const PreguntaBancoUpdateSchema = PreguntaBancoSchema.extend({ RevisionEsperada: id });
+export const PreguntaBancoSchema = PreguntaBancoBaseSchema.superRefine(validarConfiguracionPregunta);
+export const PreguntaBancoUpdateSchema = PreguntaBancoBaseSchema.extend({ RevisionEsperada: id })
+  .superRefine(validarConfiguracionPregunta);
 export const GrupoBancoSchema = z.object({
   TituloReferencia: z.string().trim().min(1).max(150), Estado: EstadoBancoSchema.default('borrador'),
   Preguntas: ids.default([]), Etiquetas: ids.default([]),
@@ -42,7 +50,7 @@ const PreguntaGrupoExistenteSchema = z.object({
 }).strict();
 const PreguntaGrupoNuevaSchema = z.object({
   Origen: z.literal('nueva'), ClaveCliente: z.string().uuid(),
-  Pregunta: PreguntaBancoSchema.omit({ Estado: true }),
+  Pregunta: PreguntaBancoBaseSchema.omit({ Estado: true }).superRefine(validarConfiguracionPregunta),
 }).strict();
 export const GrupoDesdeContenidoSchema = z.object({
   TituloReferencia: z.string().trim().min(1).max(150),

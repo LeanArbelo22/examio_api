@@ -33,7 +33,7 @@ function preparar() {
     { recordset: [{ Id: 5, IdDocente: 7, DocenteActivo: true }] }, { recordset: [] },
     { recordset: [{ Id: 1, IdDocente: 7, DocenteActivo: true }] },
     { recordset: [] }, { recordset: [] }, { recordset: [] },
-    { recordset: [{ Id: 10 }] }, { recordset: [{ Id: 20 }] }, { recordset: [] }, { recordset: [] },
+    { recordset: [{ Id: 10 }] }, { recordset: [{ Id: 20 }] }, { recordset: [] }, { recordset: [] }, { recordset: [] },
     { recordset: [{ Estado: 'borrador', CantidadIntentosMaximos: 1, DuracionMinutos: 60,
       FechaInicio: '2030-06-15T10:00:00Z', FechaFin: '2030-06-15T12:00:00Z' }] },
     { recordset: [{ Id: 10, TituloReferencia: 'Redes' }] },

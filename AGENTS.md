@@ -136,6 +136,10 @@ se vincula exclusivamente con Docente o Alumno según rol.
 Reglas importantes:
 
 - Reutilizar SPs, parametrizar consultas y usar transacciones relacionadas.
+- En migraciones idempotentes, usar SQL dinámico para toda sentencia posterior que
+  referencie tablas o columnas creadas o alteradas en el mismo batch (índices,
+  constraints, backfills y consultas). SQL Server puede compilar esas referencias
+  contra el esquema anterior y producir `Invalid column name` antes de ejecutarlas.
 - Respetar bajas lógicas y constraints de estados.
 - No cambiar esquema ni Stored Procedures sin necesidad y aprobación explícita.
 - Mantener consistencia temporal; la documentación espera fechas ISO/UTC, aunque
@@ -178,8 +182,9 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 21 suites y 407 tests pasan, también con
-`--runInBand --detectOpenHandles`. Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
+Estado de referencia reciente: 21 suites y 432 tests pasan, también con
+`--runInBand --detectOpenHandles`.
+Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
 revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
 verificación en una base aislada; los mocks no prueban esos comportamientos reales.
 
@@ -217,6 +222,19 @@ Convenciones:
   persistente requieren la migración `20260926_evaluacion_revision_idempotencia.sql`.
 - La migración `20261011_calificacion_intentos_telemetria.sql` fue aplicada dos veces y
   verificada en la base de prueba. No asumir que está aplicada en otros ambientes.
+- La migración de etapa 1 `20261013_respuestas_multiples_justificacion.sql` debe
+  reaplicarse con su versión corregida: la aplicación anterior conservó checks legacy
+  de `Pregunta.Tipo`/`BancoPregunta.Tipo` que bloqueaban `multiple`, aunque el resto del
+  esquema y el verificador anterior parecían correctos. El verificador actualizado
+  detecta esos checks residuales. La etapa 2 implementa render inmutable,
+  guardado atómico por conjunto con UUID/revisión, validación al entregar y corrección
+  exacta/parcial desde snapshots. Requiere aplicar manualmente
+  `20261014_runtime_respuestas_multiples.sql` y su verificador; no asumirlo en otros
+  ambientes.
+- La etapa previa a telemetría temporal requiere aplicar manualmente
+  `20261015_anulacion_confirmacion_revision.sql`: agrega anulación por incidente,
+  confirmación auditada de corrección y el bloqueo de revisión del alumno. No asumirla
+  aplicada fuera de la base donde se verifique dos veces junto con su script de lectura.
 - Etapas 1 a 6 de calificación implementadas: configuración 10/100, puntaje por grupo,
   corrección por puntaje sobre `IntentoPregunta`, recálculo, override final auditado y
   selección automática/manual del intento válido, más historial propio filtrable basado
@@ -267,6 +285,9 @@ Convenciones:
 - Los puntajes pertenecen a `GrupoPregunta`, no a sus variantes. En modo iguales el
   reparto se materializa en centavos por ID estable; en personalizados la publicación
   exige suma exacta. El render alumno omite el máximo si la actividad lo configura.
+- `mc` continúa significando selección única; `multiple` es un tipo distinto. No
+  reinterpretar respuestas históricas. El runtime usa snapshots; el contrato legacy
+  `IdOpcionNueva` continúa, mientras el nuevo usa conjunto, UUID y revisión optimista.
 - Banco privado: propiedad por `Docente.Legajo`, estados y revisión optimista.
   `code` solo como borrador en v1. Admin no escribe ni importa bancos.
   Migración `20260908_banco_preguntas.sql` manual antes de desplegar. Nunca ejecutar al arrancar.
@@ -284,6 +305,10 @@ Convenciones:
   llegar separados; no sobrescribir un evento completado ni agregar consecuencias
   automáticas. La sincronización nueva vence siete días después del fin del intento,
   pero un replay idéntico ya persistido debe seguir siendo válido.
+- Registrar un incidente no anula el intento. La consecuencia sólo se aplica mediante
+  `PUT /intentos/:idIntento/anular-por-incidente/:eventoId`, que conserva respuestas,
+  exige estado en progreso y audita una única anulación. Hasta la etapa 5, la revisión
+  del alumno exige intento entregado y corrección confirmada.
 - Las transacciones de evaluaciones y actas deben hacer rollback ante cualquier
   fallo.
 - Estados incompletos: vencimiento automático, anulación manual, firma de acta y

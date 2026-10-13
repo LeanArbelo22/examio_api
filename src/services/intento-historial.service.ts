@@ -79,6 +79,10 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
       I.FechaFin,
       I.NotaAutomatica,
       I.NotaFinal,
+      I.CorreccionConfirmada,
+      CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
+      CAST(CASE WHEN I.Estado='entregado' AND I.CorreccionConfirmada=1
+           THEN 1 ELSE 0 END AS bit) AS RevisionDisponible,
       A.EscalaCalificacion,
       A.NotaAprobacion,
       CASE WHEN I.NotaFinal IS NULL THEN 'pendiente'
@@ -114,7 +118,8 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
       B.IdIntento,B.IdActividad,B.IdPublicacion,B.Titulo,B.Tipo,B.IdMateria,B.Materia,
       B.IdMateriaDivision,B.Division,B.NumeroIntento,B.CantidadIntentosMaximos,B.Estado,
       B.FechaInicio,B.FechaFin,B.NotaAutomatica,B.NotaFinal,B.EscalaCalificacion,
-      B.NotaAprobacion,B.Resultado,B.EstadoCorreccion,
+      B.NotaAprobacion,B.Resultado,B.EstadoCorreccion,B.CorreccionPendiente,
+      B.CorreccionConfirmada,B.RevisionDisponible,
       CAST(CASE WHEN B.Estado='entregado' AND (
         B.IdIntentoOverride=B.IdIntento OR
         (B.IdIntentoOverride IS NULL AND B.OrdenAutomatico=1)
@@ -130,7 +135,8 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
     SELECT IdIntento,IdActividad,IdPublicacion,Titulo,Tipo,IdMateria,Materia,
       IdMateriaDivision,Division,NumeroIntento,CantidadIntentosMaximos,Estado,
       FechaInicio,FechaFin,NotaAutomatica,NotaFinal,EscalaCalificacion,NotaAprobacion,
-      Resultado,EstadoCorreccion,EsIntentoValido,SeleccionIntentoValido
+      Resultado,EstadoCorreccion,CorreccionPendiente,CorreccionConfirmada,RevisionDisponible,
+      EsIntentoValido,SeleccionIntentoValido
     FROM #IntentosFiltrados
     ORDER BY ${orderBy} ${direction},IdIntento DESC
     OFFSET @Offset ROWS FETCH NEXT @Limite ROWS ONLY;

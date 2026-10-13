@@ -7,6 +7,9 @@ import { responderErrorBanco } from './banco.controller';
 import { asignarNotaFinalManual, corregirPreguntaIntento } from '../services/intento-correccion.service';
 import { MisIntentosQuerySchema } from '../schemas/intento.schema';
 import { obtenerMisIntentos } from '../services/intento-historial.service';
+import { finalizarIntentoRuntime, guardarRespuestaIntento } from '../services/intento-respuesta.service';
+import { anularIntentoPorIncidente, confirmarCorreccionIntento } from '../services/intento-estado.service';
+import { EventoIdSchema } from '../schemas/telemetria.schema';
 
 const idPositivo = (value: string, nombre: string): number => {
   const parsed = Number(value);
@@ -17,6 +20,10 @@ const idPositivo = (value: string, nombre: string): number => {
 export const iniciarExamen = async (req: Request, res: Response) => {
   try {
     const { IdPublicacion, IdAlumno } = req.body;
+    const actor = (req as Request & { user: ActorBanco }).user;
+    if (actor.role === 'alumno' && actor.idAlumno !== IdAlumno) {
+      throw new BancoError(403, 'No puede iniciar un intento para otro alumno', 'ATTEMPT_SCOPE_FORBIDDEN');
+    }
 
     // ── Candado de seguridad: verificar límite de intentos ──
     const check = await pool.request()
@@ -50,67 +57,45 @@ export const iniciarExamen = async (req: Request, res: Response) => {
       .execute('SP_Intento_IniciarExamen');
 
     res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const guardarRespuesta = async (req: Request, res: Response) => {
   try {
-    const { IdIntento, IdPregunta, IdOpcionNueva, RtaTexto } = req.body;
-
-    if (IdOpcionNueva != null) {
-      await pool.request()
-        .input('IdIntento', sql.Int, IdIntento)
-        .input('IdPregunta', sql.Int, IdPregunta)
-        .input('IdOpcionNueva', sql.Int, IdOpcionNueva)
-        .execute('SP_Respuesta_GuardarOpcion');
-
-      res.json({ success: true, message: 'Respuesta guardada y auditada correctamente.' });
-    } else {
-      const existing = await pool.request()
-        .input('IdIntento', sql.Int, IdIntento)
-        .input('IdPregunta', sql.Int, IdPregunta)
-        .query('SELECT Id FROM Respuesta WHERE IdIntento = @IdIntento AND IdPregunta = @IdPregunta');
-
-      if (existing.recordset.length === 0) {
-        await pool.request()
-          .input('IdIntento', sql.Int, IdIntento)
-          .input('IdPregunta', sql.Int, IdPregunta)
-          .input('RtaTexto', sql.NVarChar, RtaTexto || null)
-          .query('INSERT INTO Respuesta (IdIntento, IdPregunta, RtaTexto) VALUES (@IdIntento, @IdPregunta, @RtaTexto)');
-      } else {
-        await pool.request()
-          .input('IdIntento', sql.Int, IdIntento)
-          .input('IdPregunta', sql.Int, IdPregunta)
-          .input('RtaTexto', sql.NVarChar, RtaTexto || null)
-          .query('UPDATE Respuesta SET RtaTexto = @RtaTexto WHERE IdIntento = @IdIntento AND IdPregunta = @IdPregunta');
-      }
-
-      res.json({ success: true, message: 'Respuesta de texto guardada correctamente.' });
-    }
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+    const data = await guardarRespuestaIntento(
+      (req as Request & { user: ActorBanco }).user,
+      req.body,
+    );
+    res.json({
+      success: true,
+      message: 'Respuesta guardada y auditada correctamente.',
+      data: mapKeysToCamelCase(data),
+    });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const finalizarExamen = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    console.log('🔍 [finalizarExamen] id:', id, '| body:', req.body);
-    const result = await pool.request()
-      .input('IdIntento', sql.Int, id)
-      .execute('SP_Intento_FinalizarExamen');
+    const idIntento = idPositivo(req.params.id, 'id');
+    const data = await finalizarIntentoRuntime(
+      (req as Request & { user: ActorBanco }).user,
+      idIntento,
+    );
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
+};
 
-    console.log('🔍 [finalizarExamen] SP result:', JSON.stringify(result.recordset, null, 2));
-    res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    console.log('🔍 [finalizarExamen] ERROR:', message);
-    res.status(500).json({ success: false, message });
-  }
+export const anularPorIncidente = async (req: Request, res: Response) => {
+  try {
+    const idIntento = idPositivo(req.params.idIntento, 'idIntento');
+    const eventoId = EventoIdSchema.parse(req.params.eventoId);
+    const data = await anularIntentoPorIncidente(
+      (req as Request & { user: ActorBanco }).user,
+      idIntento,
+      eventoId,
+    );
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const getHistorialPorAlumno = async (req: Request, res: Response) => {
@@ -146,6 +131,10 @@ export const getIntentosDetallados = async (req: Request, res: Response) => {
       .query(`
         SELECT I.Id AS IdIntento, I.IdAlumno, I.IdPublicacion, I.Estado,
                I.NotaFinal, I.NotaAutomatica, I.FechaInicio, I.FechaFin,
+               I.CorreccionConfirmada,
+               CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
+               CAST(CASE WHEN I.Estado='entregado' AND I.CorreccionConfirmada=1
+                    THEN 1 ELSE 0 END AS bit) AS RevisionDisponible,
                I.NumeroIntento,
                A.Titulo AS TituloEvaluacion, A.Tipo AS TipoEvaluacion,
                A.DuracionMinutos,
@@ -178,7 +167,10 @@ export const getHistorialCorregido = async (req: Request, res: Response) => {
                DV.Descripcion AS Division,
                I.FechaFin,
                I.NotaFinal,
-               I.NumeroIntento
+               I.NumeroIntento,I.CorreccionConfirmada,
+               CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
+               CAST(CASE WHEN I.Estado='entregado' AND I.CorreccionConfirmada=1
+                    THEN 1 ELSE 0 END AS bit) AS RevisionDisponible
         FROM Intento I
         INNER JOIN Publicacion P ON I.IdPublicacion = P.Id
         INNER JOIN Actividad A ON P.IdActividad = A.Id
@@ -206,6 +198,8 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       .query(`
         SELECT I.Id AS IdIntento, I.IdAlumno, I.IdPublicacion, I.Estado,
                I.NotaFinal, I.NotaAutomatica, I.NotaFinalCalculada, I.NotaFinalManual,
+               I.CorreccionConfirmada,I.CorreccionConfirmadaPor,
+               I.FechaCorreccionConfirmada,I.OrigenConfirmacionCorreccion,
                I.FechaInicio, I.FechaFin,
                I.NumeroIntento,
                AL.Nombre, AL.Apellido, AL.Correo,
@@ -244,25 +238,42 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       });
     }
 
+    const revisionDisponible = intento.Estado === 'entregado' && Boolean(intento.CorreccionConfirmada);
+    if (actor.role === 'alumno' && !revisionDisponible) {
+      return res.status(409).json({
+        success: false,
+        message: 'La revisión del intento todavía no está disponible',
+        code: 'REVIEW_NOT_AVAILABLE',
+      });
+    }
+
     const preguntasResult = await pool.request()
       .input('IdIntento', sql.Int, idIntento)
       .query(`
-        SELECT PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,
-               GP.TituloReferencia AS GrupoConceptualmente,
+        SELECT IP.IdPregunta,
+               COALESCE(IP.EnunciadoSnapshot,PR.Enunciado) AS Enunciado,
+               COALESCE(IP.TipoSnapshot,PR.Tipo) AS Tipo,
+               COALESCE(IP.GrupoTituloSnapshot,GP.TituloReferencia) AS GrupoConceptualmente,
+               IP.ModoJustificacionSnapshot AS ModoJustificacion,
+               IP.EstrategiaCorreccionSnapshot AS EstrategiaCorreccion,
+               IP.TratamientoJustificacionSnapshot AS TratamientoJustificacion,
                IP.PuntajeMaximoSnapshot, IP.PuntajeObtenido, IP.OrigenCorreccion,
+               IP.PuntajeAutomaticoOpciones,
                IP.ComentariosDocente AS ComentariosCorreccion,
                IP.CorregidoPor, IP.FechaCorreccion,
-               O.Id AS IdOpcion, O.Texto AS OpcionTexto, O.EsCorrecta,
-               R.Id AS IdRespuesta, R.RtaTexto, R.EsCorrecta AS RespuestaEsCorrecta, R.ComentariosDocente,
+               S.IdOpcionOrigen AS IdOpcion,S.TextoSnapshot AS OpcionTexto,
+               S.EsCorrectaSnapshot AS EsCorrecta,
+               R.Id AS IdRespuesta,R.RtaTexto,R.Justificacion,R.Revision,
+               R.EsCorrecta AS RespuestaEsCorrecta,R.ComentariosDocente,
                CASE WHEN RO.IdOpcion IS NOT NULL THEN 1 ELSE 0 END AS FueSeleccionada
-        FROM IntentoPregunta IP
-        INNER JOIN Pregunta PR ON IP.IdPregunta = PR.Id
-        INNER JOIN GrupoPregunta GP ON PR.IdGrupoPregunta = GP.Id
-        LEFT JOIN Opcion O ON O.IdPregunta = PR.Id
-        LEFT JOIN Respuesta R ON R.IdIntento = IP.IdIntento AND R.IdPregunta = PR.Id
-        LEFT JOIN RespuestaOpcion RO ON R.Id = RO.IdRespuesta AND RO.IdOpcion = O.Id
+        FROM dbo.IntentoPregunta IP
+        LEFT JOIN dbo.Pregunta PR ON IP.IdPregunta=PR.Id
+        LEFT JOIN dbo.GrupoPregunta GP ON PR.IdGrupoPregunta=GP.Id
+        LEFT JOIN dbo.IntentoPreguntaOpcionSnapshot S ON S.IdIntentoPregunta=IP.Id
+        LEFT JOIN dbo.Respuesta R ON R.IdIntento=IP.IdIntento AND R.IdPregunta=IP.IdPregunta
+        LEFT JOIN dbo.RespuestaOpcion RO ON R.Id=RO.IdRespuesta AND RO.IdOpcion=S.IdOpcionOrigen
         WHERE IP.IdIntento = @IdIntento
-        ORDER BY GP.Id, PR.Id, O.Id
+        ORDER BY IP.Id,S.Posicion
       `);
 
     const preguntasMap: Record<number, any> = {};
@@ -276,7 +287,11 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
           grupoConceptualmente: row.GrupoConceptualmente,
           puntajeMaximo: row.PuntajeMaximoSnapshot,
           puntajeObtenido: row.PuntajeObtenido,
+          puntajeAutomaticoOpciones: row.PuntajeAutomaticoOpciones,
           origenCorreccion: row.OrigenCorreccion,
+          modoJustificacion: row.ModoJustificacion,
+          estrategiaCorreccion: row.EstrategiaCorreccion,
+          tratamientoJustificacion: row.TratamientoJustificacion,
           comentariosDocente: row.ComentariosCorreccion,
           corregidoPor: row.CorregidoPor,
           fechaCorreccion: row.FechaCorreccion,
@@ -298,6 +313,8 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
         preguntasMap[row.IdPregunta].respuesta = {
           idRespuesta: row.IdRespuesta,
           rtaTexto: row.RtaTexto,
+          justificacion: row.Justificacion,
+          revision: row.Revision,
           esCorrecta: row.RespuestaEsCorrecta,
           comentariosDocente: row.ComentariosDocente,
         };
@@ -307,19 +324,17 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
     const header = mapKeysToCamelCase(headerResult.recordset[0]) as Record<string, unknown>;
     delete header.idDocente;
     delete header.docenteActivo;
+    const preguntas = Object.values(preguntasMap);
     res.json({
       success: true,
       data: {
         ...header,
-        preguntas: Object.values(preguntasMap),
+        correccionPendiente: !Boolean(intento.CorreccionConfirmada),
+        revisionDisponible,
+        preguntas,
       },
     });
-  } catch (error: any) {
-    console.error("=== EXAMIO BACKEND CRASH [getIntentoCompleto] ===");
-    console.error("Mensaje:", error?.message ?? error);
-    console.error("Stack:", error?.stack ?? "(no stack)");
-    res.status(500).json({ success: false, message: error?.message ?? 'Error desconocido' });
-  }
+  } catch (error: unknown) { responderErrorBanco(res, error); }
 };
 
 export const calificarIntento = async (req: Request, res: Response) => {
@@ -346,5 +361,16 @@ export const corregirRespuesta = async (req: Request, res: Response) => {
       req.body,
     );
     res.json({ success: true, message: 'Respuesta corregida correctamente', data: mapKeysToCamelCase(data) });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
+};
+
+export const confirmarCorreccion = async (req: Request, res: Response) => {
+  try {
+    const idIntento = idPositivo(req.params.idIntento, 'idIntento');
+    const data = await confirmarCorreccionIntento(
+      (req as Request & { user: ActorBanco }).user,
+      idIntento,
+    );
+    res.json({ success: true, message: 'Corrección confirmada correctamente', data: mapKeysToCamelCase(data) });
   } catch (err: unknown) { responderErrorBanco(res, err); }
 };

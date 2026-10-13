@@ -5,6 +5,12 @@ function opcionesIguales(a: any[], b: any[]) {
   return a.length === b.length && a.every((op, i) => op.Texto === b[i].Texto && Boolean(op.EsCorrecta) === Boolean(b[i].EsCorrecta));
 }
 
+function configuracionIgual(a: any, b: any) {
+  return (a.ModoJustificacion ?? 'sin_justificacion') === (b.ModoJustificacion ?? 'sin_justificacion') &&
+    (a.EstrategiaCorreccion ?? 'exacta') === (b.EstrategiaCorreccion ?? 'exacta') &&
+    (a.TratamientoJustificacion ?? 'informativa') === (b.TratamientoJustificacion ?? 'informativa');
+}
+
 export async function guardarActividadCompletaEnBanco(db: DbBanco, actor: ActorBanco, idActividad: number) {
   const docente = await propietario(db, actor, true);
   const grupos = (await consultar(db, `SELECT Id,TituloReferencia,IdBancoGrupoOrigen
@@ -12,7 +18,8 @@ export async function guardarActividadCompletaEnBanco(db: DbBanco, actor: ActorB
   const mappings = [];
 
   for (const grupo of grupos) {
-    const preguntas = (await consultar(db, `SELECT Id,Enunciado,Tipo,IdBancoPreguntaOrigen
+    const preguntas = (await consultar(db, `SELECT Id,Enunciado,Tipo,ModoJustificacion,EstrategiaCorreccion,
+      TratamientoJustificacion,IdBancoPreguntaOrigen
       FROM dbo.Pregunta WHERE IdGrupoPregunta=@Grupo ORDER BY Id`, { Grupo: grupo.Id })).recordset;
     const bancoPreguntas: { Id: number; Revision: number; Estado: string }[] = [];
     const preguntaMappings = [];
@@ -25,7 +32,8 @@ export async function guardarActividadCompletaEnBanco(db: DbBanco, actor: ActorB
       if (pregunta.IdBancoPreguntaOrigen) {
         const actual = await detalleBanco(db, 'preguntas', pregunta.IdBancoPreguntaOrigen, docente);
         if (actual.Titulo === grupo.TituloReferencia && actual.Enunciado === pregunta.Enunciado &&
-            actual.Tipo === pregunta.Tipo && actual.Estado === estadoPregunta && opcionesIguales(opciones, actual.Opciones))
+            actual.Tipo === pregunta.Tipo && actual.Estado === estadoPregunta && configuracionIgual(pregunta, actual) &&
+            opcionesIguales(opciones, actual.Opciones))
           bancoPregunta = actual;
       }
       if (!bancoPregunta) {
@@ -33,6 +41,9 @@ export async function guardarActividadCompletaEnBanco(db: DbBanco, actor: ActorB
           Titulo: grupo.TituloReferencia,
           Enunciado: pregunta.Enunciado,
           Tipo: pregunta.Tipo,
+          ModoJustificacion: pregunta.ModoJustificacion ?? 'sin_justificacion',
+          EstrategiaCorreccion: pregunta.EstrategiaCorreccion ?? 'exacta',
+          TratamientoJustificacion: pregunta.TratamientoJustificacion ?? 'informativa',
           Estado: estadoPregunta,
           Opciones: opciones.map((o: any) => ({ Texto: o.Texto, EsCorrecta: Boolean(o.EsCorrecta) })),
           Etiquetas: [],

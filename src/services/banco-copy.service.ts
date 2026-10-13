@@ -2,6 +2,7 @@ import { GrupoDesdeContenidoInput, ImportacionesBanco } from '../schemas/banco.s
 import { ActorBanco, BancoError, DbBanco, consultar, propietario, validarDisponible, verificarRevision } from './banco-common.service';
 import { bloquearBanco, detalleBanco, guardarGrupo, guardarPregunta } from './banco.service';
 import { autorizarActividad } from './evaluacion-access.service';
+import { actualizarContenidoHash } from './pregunta-content.service';
 
 export async function copiarBanco(db: DbBanco, actor: ActorBanco, actividad: number, selecciones: ImportacionesBanco) {
   const docente = await propietario(db, actor, true);
@@ -43,15 +44,19 @@ export async function copiarBanco(db: DbBanco, actor: ActorBanco, actividad: num
     const preguntas = [];
     for (const p of item.preguntas) {
       const preguntaId = (await consultar(db, `INSERT INTO dbo.Pregunta
-        (IdGrupoPregunta,Enunciado,Tipo,IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
-        OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Origen,@Revision,SYSUTCDATETIME())`,
-        { Grupo: grupoId, Enunciado: p.Enunciado, Tipo: p.Tipo, Origen: p.Id, Revision: p.Revision })).recordset[0].Id;
+        (IdGrupoPregunta,Enunciado,Tipo,ModoJustificacion,EstrategiaCorreccion,TratamientoJustificacion,
+         IdBancoPreguntaOrigen,RevisionBancoOrigen,FechaIncorporacionBanco)
+        OUTPUT inserted.Id VALUES(@Grupo,@Enunciado,@Tipo,@Justificacion,@Estrategia,@Tratamiento,@Origen,@Revision,SYSUTCDATETIME())`,
+        { Grupo: grupoId, Enunciado: p.Enunciado, Tipo: p.Tipo,
+          Justificacion: p.ModoJustificacion ?? 'sin_justificacion', Estrategia: p.EstrategiaCorreccion ?? 'exacta',
+          Tratamiento: p.TratamientoJustificacion ?? 'informativa', Origen: p.Id, Revision: p.Revision })).recordset[0].Id;
       const opciones = [];
       for (const op of p.Opciones) {
         const opcionId = (await consultar(db, `INSERT INTO dbo.Opcion(IdPregunta,Texto,EsCorrecta)
           OUTPUT inserted.Id VALUES(@Pregunta,@Texto,@Correcta)`, { Pregunta: preguntaId, Texto: op.Texto, Correcta: op.EsCorrecta })).recordset[0].Id;
         opciones.push({ IdOpcion: opcionId, IdBancoOpcion: op.Id });
       }
+      await actualizarContenidoHash(db, 'evaluacion', preguntaId);
       preguntas.push({ IdPregunta: preguntaId, IdBancoPregunta: p.Id, RevisionBancoOrigen: p.Revision, Opciones: opciones });
     }
     resultado.push({ IdGrupo: grupoId, IdBancoGrupo: item.grupo?.Id ?? null, Preguntas: preguntas });
@@ -75,12 +80,15 @@ export async function desdeEvaluacion(db: DbBanco, actor: ActorBanco, input: {Id
   const copiarPregunta = async (id: number) => {
     if (vistos.has(id)) throw new BancoError(400, 'Selección repetida de una pregunta', 'BANK_CONTENT_INVALID');
     vistos.add(id);
-    const p = (await consultar(db, `SELECT p.Id,p.Enunciado,p.Tipo,g.TituloReferencia FROM dbo.Pregunta p
+    const p = (await consultar(db, `SELECT p.Id,p.Enunciado,p.Tipo,p.ModoJustificacion,p.EstrategiaCorreccion,
+      p.TratamientoJustificacion,g.TituloReferencia FROM dbo.Pregunta p
       JOIN dbo.GrupoPregunta g ON g.Id=p.IdGrupoPregunta WHERE p.Id=@Id AND g.IdActividad=@Actividad`,
       { Id: id, Actividad: input.IdActividad })).recordset[0];
     if (!p) throw new BancoError(404, 'Pregunta no encontrada en la evaluación');
     const opciones = (await consultar(db, 'SELECT Texto,EsCorrecta FROM dbo.Opcion WHERE IdPregunta=@Id ORDER BY Id', { Id: id })).recordset;
     const copia = await guardarPregunta(db, docente, { Titulo: p.TituloReferencia, Enunciado: p.Enunciado, Tipo: p.Tipo,
+      ModoJustificacion: p.ModoJustificacion ?? 'sin_justificacion', EstrategiaCorreccion: p.EstrategiaCorreccion ?? 'exacta',
+      TratamientoJustificacion: p.TratamientoJustificacion ?? 'informativa',
       Estado: 'borrador', Opciones: opciones.map((o: { Texto: string; EsCorrecta: boolean }) => ({ Texto: o.Texto, EsCorrecta: o.EsCorrecta })), Etiquetas: [] });
     return { IdPreguntaOrigen: id, IdBancoPregunta: copia.Id };
   };

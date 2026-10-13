@@ -15,7 +15,7 @@ beforeAll(() => {
   process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
   process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   docenteToken = jwt.sign({ id: 1, email: 'lfernandez@test.com', role: 'docente', idDocente: 10 }, process.env.JWT_SECRET);
-  alumnoToken = jwt.sign({ id: 2, email: 'jalumno@test.com', role: 'alumno' }, process.env.JWT_SECRET);
+  alumnoToken = jwt.sign({ id: 2, email: 'jalumno@test.com', role: 'alumno', idAlumno: 2 }, process.env.JWT_SECRET);
   app = require('../src/app').app;
 });
 
@@ -64,6 +64,7 @@ describe('POST /api/evaluaciones/guardar-completo', () => {
       .mockResolvedValueOnce({ recordset: [{ Id: 100 }] }) // INSERT Pregunta
       .mockResolvedValueOnce({})                  // INSERT Opcion 1
       .mockResolvedValueOnce({})                  // INSERT Opcion 2
+      .mockResolvedValueOnce({})                  // UPDATE ContenidoHash
       .mockResolvedValueOnce({ recordset: [{ Estado: 'borrador', CantidadIntentosMaximos: 2, DuracionMinutos: 120,
         FechaInicio: '2030-06-15T10:00:00Z', FechaFin: '2030-06-15T12:00:00Z' }] })
       .mockResolvedValueOnce({ recordset: [{ Id: 10, TituloReferencia: 'SQL Básico' }] })
@@ -167,7 +168,7 @@ describe('borradores reales', () => {
       { recordset: [{ Id: 1, IdDocente: 10, DocenteActivo: true }] },
       { recordset: [{ Id: 50, Revision: 1 }] }, { recordset: [{ Id: 60 }] },
     ];
-    if (estructura) respuestas.push({ recordset: [{ Id: 70 }] }, { recordset: [{ Id: 80 }] });
+    if (estructura) respuestas.push({ recordset: [{ Id: 70 }] }, { recordset: [{ Id: 80 }] }, { recordset: [] });
     respuestas.push({ recordset: [] });
     (tx.request().query as jest.Mock).mockImplementation(() => Promise.resolve(respuestas.shift() ?? { recordset: [] }));
   };
@@ -199,6 +200,22 @@ describe('borradores reales', () => {
     expect(res.status).toBe(201); expect(res.body.data.revision).toBe(1);
   });
 
+  it('persiste configuración múltiple incompleta dentro del borrador', async () => {
+    prepararCreacion(true);
+    const res = await request(app).post('/api/evaluaciones/guardar-completo')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000013')
+      .send({ Titulo: 'Borrador múltiple', IdMateriaDivision: 1, Estado: 'borrador', GruposPreguntas: [
+        { TituloReferencia: 'Protocolos', Variantes: [{ Enunciado: '', Tipo: 'multiple',
+          ModoJustificacion: 'opcional', EstrategiaCorreccion: 'parcial_sin_penalizacion',
+          TratamientoJustificacion: 'informativa', Opciones: [] }] },
+      ] });
+    expect(res.status).toBe(201);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Justificacion', expect.anything(), 'opcional');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Estrategia', expect.anything(), 'parcial_sin_penalizacion');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Tratamiento', expect.anything(), 'informativa');
+  });
+
   it('aplica umbral 40 por defecto al crear un borrador sobre escala 100', async () => {
     prepararCreacion(false);
     const res = await request(app).post('/api/evaluaciones/guardar-completo')
@@ -218,7 +235,7 @@ describe('POST /api/evaluaciones/:idActividad/publicar-completo', () => {
     GuardarTodoEnBanco: false,
   };
 
-  function prepararPublicacion(opciones: { gruposPublicables?: boolean; revision?: number } = {}) {
+  function prepararPublicacion(opciones: { gruposPublicables?: boolean; revision?: number; runtimePendiente?: boolean } = {}) {
     const tx = new mock.pool.Transaction();
     const query = tx.request().query as jest.Mock;
     const gruposPublicables = opciones.gruposPublicables ?? true;
@@ -230,13 +247,17 @@ describe('POST /api/evaluaciones/:idActividad/publicar-completo', () => {
     if ((opciones.revision ?? 1) === 1) respuestas.push(
       { recordset: [{ Id: 1, IdDocente: 10, DocenteActivo: true }] },
       { recordset: [] }, { recordset: [] }, { recordset: [] },
-      { recordset: [{ Id: 10 }] }, { recordset: [{ Id: 100 }] }, { recordset: [] }, { recordset: [] },
+      { recordset: [{ Id: 10 }] }, { recordset: [{ Id: 100 }] }, { recordset: [] }, { recordset: [] }, { recordset: [] },
       { recordset: [{ Estado: 'borrador', CantidadIntentosMaximos: 2, DuracionMinutos: 120,
         FechaInicio: '2030-06-15T10:00:00Z', FechaFin: '2030-06-15T12:00:00Z' }] },
       { recordset: gruposPublicables ? [{ Id: 10, TituloReferencia: 'SQL Básico' }] : [] },
     );
     if ((opciones.revision ?? 1) === 1 && gruposPublicables) respuestas.push(
-      { recordset: [{ Id: 100, Enunciado: '¿Qué comando SELECT es correcto?', Tipo: 'mc' }] },
+      { recordset: [{ Id: 100, Enunciado: '¿Qué comando SELECT es correcto?',
+        Tipo: opciones.runtimePendiente ? 'multiple' : 'mc',
+        ModoJustificacion: opciones.runtimePendiente ? 'obligatoria' : 'sin_justificacion',
+        EstrategiaCorreccion: opciones.runtimePendiente ? 'parcial_penalizada' : 'exacta',
+        TratamientoJustificacion: opciones.runtimePendiente ? 'revision_manual' : 'informativa' }] },
       { recordset: payloadValido.GruposPreguntas[0].Variantes[0].Opciones },
       { recordset: [{ Revision: 2 }] }, { recordset: [] },
     );
@@ -263,6 +284,21 @@ describe('POST /api/evaluaciones/:idActividad/publicar-completo', () => {
       .send(publicarPayload);
     expect(res.status).toBe(400); expect(res.body.code).toBe('DRAFT_NOT_PUBLISHABLE');
     expect(ultimaTransaccion().rollback).toHaveBeenCalled(); expect(ultimaTransaccion().commit).not.toHaveBeenCalled();
+  });
+
+  it('publica preguntas múltiples cuando su estructura es válida', async () => {
+    prepararPublicacion({ runtimePendiente: true });
+    const variante = publicarPayload.GruposPreguntas[0].Variantes[0];
+    const res = await request(app).post('/api/evaluaciones/42/publicar-completo')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000024')
+      .send({ ...publicarPayload, GruposPreguntas: [{ ...publicarPayload.GruposPreguntas[0], Variantes: [{
+        ...variante, Tipo: 'multiple', ModoJustificacion: 'obligatoria',
+        EstrategiaCorreccion: 'parcial_penalizada', TratamientoJustificacion: 'revision_manual',
+        Opciones: variante.Opciones.map(o => ({ ...o, EsCorrecta: true })),
+      }] }] });
+    expect(res.status).toBe(200);
+    expect(ultimaTransaccion().commit).toHaveBeenCalled();
   });
 
   it('rechaza una revisión obsoleta sin sobrescribir', async () => {
@@ -484,6 +520,9 @@ describe('GET /api/evaluaciones/pendientes/:matricula', () => {
 describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
   it('retorna 200 con preguntas sorteadas en camelCase', async () => {
     const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{ IdIntento: 1, IdAlumno: 2, Estado: 'en_progreso' }],
+    });
     (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
       recordset: [
         { IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL Básico' },
@@ -503,12 +542,16 @@ describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
       enunciado: '¿Qué es SQL?',
       tipo: 'mc',
       grupoConceptualmente: 'SQL Básico',
+      respuesta: null,
     });
     expect(res.body.data[1].idPregunta).toBe(20);
   });
 
   it('devuelve puntajeMaximo únicamente cuando la actividad lo habilita', async () => {
     const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, IdAlumno: 2, Estado: 'en_progreso' }] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 1, IdAlumno: 2, Estado: 'en_progreso' }] });
     (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
       recordset: [{
         IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL',
@@ -530,11 +573,44 @@ describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
       .set('Authorization', `Bearer ${alumnoToken}`);
     expect(oculto.body.data[0].puntajeMaximo).toBeUndefined();
   });
+
+  it('restaura selección múltiple, justificación y revisión del borrador', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{ IdIntento: 1, IdAlumno: 2, Estado: 'en_progreso' }],
+    });
+    (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
+      recordset: [{
+        IdPregunta: 10, Enunciado: 'Seleccione protocolos', Tipo: 'multiple',
+        GrupoConceptualmente: 'Redes', ModoJustificacion: 'obligatoria',
+        EstrategiaCorreccion: 'parcial_penalizada', TratamientoJustificacion: 'revision_manual',
+        MostrarPuntajePorPregunta: false, IdRespuesta: 20,
+        RtaTexto: null, Justificacion: 'Son protocolos de transporte', Revision: 3,
+        OpcionesSeleccionadasJson: '[{"idOpcion":3},{"idOpcion":5}]',
+      }],
+    });
+
+    const res = await request(app).get('/api/evaluaciones/intento/1/renderizar')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toMatchObject({
+      tipo: 'multiple', modoJustificacion: 'obligatoria',
+      estrategiaCorreccion: 'parcial_penalizada', tratamientoJustificacion: 'revision_manual',
+      respuesta: {
+        idRespuesta: 20, idsOpcionesSeleccionadas: [3, 5],
+        justificacion: 'Son protocolos de transporte', revision: 3,
+      },
+    });
+  });
 });
 
 describe('GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento', () => {
   it('retorna 200 con opciones en camelCase', async () => {
     const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{ IdIntento: 1, IdAlumno: 2, Estado: 'en_progreso' }],
+    });
     (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
       recordset: [
         { IdOpcion: 1, Texto: 'SELECT * FROM users', EsCorrecta: true, FueSeleccionada: 1 },
@@ -551,7 +627,6 @@ describe('GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento', () =>
     expect(res.body.data[0]).toEqual({
       idOpcion: 1,
       texto: 'SELECT * FROM users',
-      esCorrecta: true,
       fueSeleccionada: 1,
     });
   });
@@ -577,8 +652,12 @@ describe('GET /api/evaluaciones/:id/detalle', () => {
       })
       .mockResolvedValueOnce({
         recordset: [
-          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 1, Texto: 'DDL', EsCorrecta: true },
-          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', IdOpcion: 2, Texto: 'DML', EsCorrecta: false },
+          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc',
+            ModoJustificacion: 'sin_justificacion', EstrategiaCorreccion: 'exacta', TratamientoJustificacion: 'informativa',
+            ContenidoHash: 'a'.repeat(64), IdOpcion: 1, Texto: 'DDL', EsCorrecta: true },
+          { IdGrupo: 1, TituloReferencia: 'SQL Básico', PuntajeMaximo: 10, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc',
+            ModoJustificacion: 'sin_justificacion', EstrategiaCorreccion: 'exacta', TratamientoJustificacion: 'informativa',
+            ContenidoHash: 'a'.repeat(64), IdOpcion: 2, Texto: 'DML', EsCorrecta: false },
         ],
       });
 
@@ -596,6 +675,10 @@ describe('GET /api/evaluaciones/:id/detalle', () => {
     expect(res.body.data.grupos[0].puntajeMaximo).toBe(10);
     expect(res.body.data.grupos[0].preguntas).toHaveLength(1);
     expect(res.body.data.grupos[0].preguntas[0].idPregunta).toBe(10);
+    expect(res.body.data.grupos[0].preguntas[0]).toMatchObject({
+      modoJustificacion: 'sin_justificacion', estrategiaCorreccion: 'exacta',
+      tratamientoJustificacion: 'informativa', contenidoHash: 'a'.repeat(64),
+    });
     expect(res.body.data.grupos[0].preguntas[0].opciones).toHaveLength(2);
   });
 
@@ -672,6 +755,7 @@ describe('PUT /api/evaluaciones/:id/modificar-completo', () => {
       .mockResolvedValueOnce({ recordset: [{ Id: 100 }] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})                   // UPDATE ContenidoHash
       .mockResolvedValueOnce({ recordset: [{ Revision: 2 }] });
 
     const res = await request(app)
@@ -683,7 +767,7 @@ describe('PUT /api/evaluaciones/:id/modificar-completo', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.message).toBe('Evaluación modificada correctamente');
     expect(mockReq.query).not.toHaveBeenCalled();
-    expect(txRequest.query).toHaveBeenCalledTimes(15);
+    expect(txRequest.query).toHaveBeenCalledTimes(16);
     const sqlEjecutado = (txRequest.query as jest.Mock).mock.calls.map(([sql]) => String(sql));
     expect(sqlEjecutado.some(sql => sql.startsWith('UPDATE dbo.GrupoPregunta'))).toBe(true);
     expect(sqlEjecutado.some(sql => sql.startsWith('UPDATE dbo.Pregunta'))).toBe(true);

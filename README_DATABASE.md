@@ -47,6 +47,14 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | `MateriaDivision` | `Id INT IDENTITY` | **Entidad asociativa central**. Vincula `Materia` + `Division` + `Docente` (opcional). Unique constraint `(IdMateria, IdDivision)`. Es la unidad organizativa fundamental para inscripciones, publicaciones y actas. |
 | `InscripcionMateria` | `(IdMateriaDivision, IdAlumno)` | Inscripción de un alumno a una comisión. FK compuesta a `MateriaDivision(Id)` y `Alumno(Matricula)`. Habilita al alumno a ver evaluaciones pendientes de esa comisión. |
 
+`GET /api/docentes/:legajo/evaluaciones` recorre la relación real
+`Publicacion -> Actividad` y
+`Publicacion -> MateriaDivision -> Materia -> Carrera`, además de
+`MateriaDivision -> Division`. Por eso puede devolver de forma estable
+`idActividad`, `idMateria`, `idMateriaDivision`, materia, división y carrera sin
+inferir pertenencia a partir de nombres. La consulta no agrupa: cada fila representa
+una publicación.
+
 ### 2.3 Tablas del Motor de Evaluaciones
 
 | Tabla | Clave Primaria | Rol |
@@ -54,7 +62,7 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | `Actividad` | `Id INT IDENTITY` | Cabecera de evaluación/tp/tarea. Además de estado y revisión, conserva `EscalaCalificacion`, `NotaAprobacion`, `ModoPuntaje`, `MostrarPuntajePorPregunta` y `CorreccionAutomaticaCerradas`. |
 | `Publicacion` | `Id INT IDENTITY` | Instancia publicada de una `Actividad` en una `MateriaDivision`. Define ventana de tiempo (`FechaInicio`, `FechaFin`) y visibilidad (`Visible BIT`). |
 | `GrupoPregunta` | `Id INT IDENTITY` | Agrupación lógica de preguntas. FK a `Actividad(Id)`. `PuntajeMaximo DECIMAL(5,2)` pertenece al grupo porque cada intento sortea una variante del grupo. |
-| `Pregunta` | `Id INT IDENTITY` | Pregunta individual. FK a `GrupoPregunta(Id)`. Campos: `Enunciado NVARCHAR(MAX)`, `Tipo` (CHECK: `'mc'`, `'vf'`, `'abierta'`, `'code'`). |
+| `Pregunta` | `Id INT IDENTITY` | Pregunta individual. FK a `GrupoPregunta(Id)`. `Tipo`: `mc`, `multiple`, `vf`, `abierta` o `code`. Conserva modo de justificación, estrategia, tratamiento y hash de contenido. |
 | `Opcion` | `Id INT IDENTITY` | Opciones de respuesta para preguntas `mc`/`vf`. FK a `Pregunta(Id)`. Campos: `Texto NVARCHAR(500)`, `EsCorrecta BIT`. |
 
 ### 2.4 Tablas de Seguimiento de Exámenes
@@ -62,10 +70,12 @@ La API Node transforma todas las claves a **camelCase** mediante `mapKeysToCamel
 | Tabla | Clave Primaria | Rol |
 |---|---|---|
 | `Intento` | `Id INT IDENTITY` | Intento de examen. `NotaFinal`, `NotaAutomatica`, `NotaFinalCalculada` y `NotaFinalManual` usan `DECIMAL(5,2)` para escalas 10/100. `NotaFinal` es el valor efectivo. |
-| **`IntentoPregunta`** | `Id INT IDENTITY` | Congela variante y `PuntajeMaximoSnapshot`. Conserva puntaje obtenido, origen automático/manual, comentario, actor y fecha; por eso una pregunta omitida podrá corregirse sin depender de `Respuesta`. |
-| `Respuesta` | `Id INT IDENTITY` | Contenedor de respuesta del alumno por pregunta. FK a `Intento(Id)` y `Pregunta(Id)`. Unique constraint `(IdIntento, IdPregunta)`. Campos: `RtaTexto NVARCHAR(MAX)` (para preguntas abiertas), `EsCorrecta BIT` (nullable, para corrección manual), `ComentariosDocente NVARCHAR(MAX)` (nullable). |
+| **`IntentoPregunta`** | `Id INT IDENTITY` | Congela variante y `PuntajeMaximoSnapshot`. La migración de respuestas múltiples prepara snapshots de tipo, justificación, estrategia, tratamiento, hash y puntaje automático provisional. |
+| `IntentoPreguntaOpcionSnapshot` | `Id BIGINT IDENTITY` | Copia inmutable de texto, corrección y posición de cada opción presentada. `IntentoPregunta` congela además enunciado, grupo, tipo y configuración. Los snapshots históricos reconstruidos se identifican mediante `SnapshotReconstruido`. |
+| `Respuesta` | `Id INT IDENTITY` | Contenedor único por intento/pregunta. Además del texto y compatibilidad legacy, prepara `Justificacion` y `Revision` optimista para el guardado atómico de la etapa 2. |
 | **`RespuestaOpcion`** | `(IdRespuesta, IdOpcion)` | **Junction** entre `Respuesta` y `Opcion`. Almacena qué opción(es) seleccionó el alumno. Permite el JOIN que usan `SP_Pregunta_ObtenerOpciones` y `SP_Intento_FinalizarExamen`. |
 | **`HistorialRespuesta`** | `Id INT IDENTITY` | **Auditoría de cambios de opción**. Cada vez que el alumno cambia su respuesta, `SP_Respuesta_GuardarOpcion` inserta aquí la opción anterior y la nueva. Permite reconstruir la secuencia completa de decisiones. |
+| `HistorialRespuestaCambio` | `Id BIGINT IDENTITY` | Auditoría preparada para conjuntos de opciones, texto y justificación. Usa UUID por evento y revisiones consecutivas; no almacena claves correctas. |
 
 ### 2.5 Tablas Antifraude y Telemetría
 
@@ -192,40 +202,44 @@ INNER JOIN GrupoPregunta GP ON P.IdGrupoPregunta = GP.Id
 WHERE IP.IdIntento = @IdIntento;
 ```
 
-No hay sorteo, no hay `NEWID()`. Devuelve exactamente las preguntas que se fijaron al iniciar el intento.
-Con la migración de calificación también devuelve el máximo congelado y el flag de
-visibilidad; el controlador elimina el máximo del DTO del alumno cuando el flag está apagado.
+No hay sorteo ni `NEWID()`. Con la etapa 2, el procedimiento usa primero los campos
+snapshot de `IntentoPregunta`, devuelve configuración y borrador guardado, además del
+máximo congelado y el flag de visibilidad. El controlador elimina el máximo cuando el
+flag está apagado.
 
 ### 3.3 Obtención de Opciones
 
 **Procedimiento:** `SP_Pregunta_ObtenerOpciones`
 
-Ejecutado por `GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento`. Retorna las opciones de una pregunta indicando cuál fue seleccionada previamente por el alumno (si existe un intento activo):
+Ejecutado por `GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento`. Desde la
+etapa 2 consulta `IntentoPreguntaOpcionSnapshot`, conserva el ID original como contrato
+y calcula `FueSeleccionada` contra `RespuestaOpcion`. La API elimina `EsCorrecta` para
+alumnos; docentes y administradores autorizados pueden recibirla.
 
 ```sql
-SELECT O.Id AS IdOpcion, O.Texto, O.EsCorrecta,
+SELECT S.IdOpcionOrigen AS IdOpcion, S.TextoSnapshot AS Texto, S.EsCorrectaSnapshot AS EsCorrecta,
        CASE WHEN RO.IdOpcion IS NOT NULL THEN 1 ELSE 0 END AS FueSeleccionada
-FROM Opcion O
-LEFT JOIN Respuesta R ON R.IdPregunta = O.IdPregunta AND R.IdIntento = @IdIntento
-LEFT JOIN RespuestaOpcion RO ON R.Id = RO.IdRespuesta AND RO.IdOpcion = O.Id
-WHERE O.IdPregunta = @IdPregunta;
+FROM IntentoPregunta IP
+JOIN IntentoPreguntaOpcionSnapshot S ON S.IdIntentoPregunta = IP.Id
+LEFT JOIN Respuesta R ON R.IdPregunta = IP.IdPregunta AND R.IdIntento = IP.IdIntento
+LEFT JOIN RespuestaOpcion RO ON R.Id = RO.IdRespuesta AND RO.IdOpcion = S.IdOpcionOrigen
+WHERE IP.IdPregunta = @IdPregunta AND IP.IdIntento = @IdIntento;
 ```
 
 La columna `FueSeleccionada` es **calculada en la query**, no existe como columna física en ninguna tabla.
 
 ### 3.4 Guardado Atómico de Respuesta con Auditoría
 
-**Procedimiento:** `SP_Respuesta_GuardarOpcion`
+Desde la etapa 2, `POST /api/intentos/guardar-respuesta` usa una transacción serializable
+en `intento-respuesta.service.ts`; `SP_Respuesta_GuardarOpcion` queda sólo como legado y
+no participa del contrato nuevo. La operación bloquea intento/pregunta, valida titularidad,
+estado y revisión, reemplaza atómicamente el conjunto de `RespuestaOpcion`, incrementa
+`Respuesta.Revision` y audita en `HistorialRespuestaCambio`. La unicidad
+`UX_Respuesta_Intento_Pregunta` protege también la creación concurrente.
 
-Ejecutado por `POST /api/intentos/guardar-respuesta`. Transacción atómica:
-
-1. Busca si ya existe una `Respuesta` para ese `(IdIntento, IdPregunta)`.
-2. Si no existe, crea la `Respuesta` y la `RespuestaOpcion`.
-3. Si existe y la opción es diferente:
-   - Inserta en `HistorialRespuesta` la opción anterior y la nueva.
-   - Elimina la `RespuestaOpcion` anterior.
-   - Inserta la nueva `RespuestaOpcion`.
-4. Si es la misma opción, no hace nada (idempotencia).
+Un `EventoId` ya persistido se compara contra el contenido canónico anterior/nuevo. Un
+replay idéntico devuelve la revisión original incluso después de la entrega; un UUID
+reutilizado con otro contenido o una revisión obsoleta produce conflicto explícito.
 
 ### 3.5 Finalización de Examen y Cálculo de Nota
 
@@ -240,6 +254,8 @@ Si el intento ya está en estado `'entregado'`, `'anulado'` o `'vencido'`, el SP
 > Desde `20261011_calificacion_intentos_telemetria.sql`, el procedimiento deja de
 > calcular una proporción binaria global. La descripción siguiente se conserva
 > únicamente como referencia del comportamiento anterior a esa migración.
+> `20261014_runtime_respuestas_multiples.sql` vuelve a actualizarlo para usar snapshots,
+> validar justificaciones obligatorias y aplicar las tres estrategias de corrección.
 
 #### Bloque 2 — Conteo separado por tipo (legacy)
 
@@ -461,7 +477,8 @@ cadena es necesario para detectar reutilización y auditar motivos sin secretos.
 
 | Valor | Significado |
 |---|---|
-| `mc` | Opción múltiple. Se selecciona una opción de una lista (`RespuestaOpcion`). |
+| `mc` | Selección única. Se selecciona exactamente una opción. |
+| `multiple` | Selección múltiple real. Puede tener varias opciones correctas y varias seleccionadas. |
 | `vf` | Verdadero/Falso. Dos opciones predefinidas. |
 | `abierta` | Desarrollo libre. El texto se almacena en `Respuesta.RtaTexto`. |
 | `code` | Ejercicio de código. (Reservado para uso futuro.) |
@@ -736,3 +753,55 @@ La sincronización nueva o de cierre se acepta hasta siete días después de
 `Intento.FechaFin`, con cinco minutos de tolerancia de reloj. Los replays idénticos ya
 persistidos siguen siendo idempotentes aun después de esa ventana. No se agregaron
 tablas, columnas ni Stored Procedures en esta etapa.
+
+### 9.6 Anulación y confirmación de corrección — etapa previa a telemetría temporal
+
+DDL: `migrations/20261015_anulacion_confirmacion_revision.sql`. Verificación de sólo
+lectura: `scripts/verificar-anulacion-confirmacion-revision.sql`.
+
+`Intento` incorpora `CorreccionConfirmada`, actor, fecha y origen. Los intentos
+históricos entregados sin puntajes pendientes reciben origen `backfill`; no se modifican
+puntajes ni notas. `HistorialEstadoCorreccionIntento` registra confirmación automática,
+confirmación manual y reaperturas por pregunta o nota. La finalización confirma
+automáticamente sólo cuando todos los `IntentoPregunta` tienen puntaje definitivo.
+
+`AnulacionIntentoIncidente` tiene una fila por intento y una FK compuesta hacia
+`IncidenteIntento(IdIntento,EventoId)`. Conserva tipo, motivo autoritativo, usuario y
+fecha. La transacción cambia únicamente el estado/fecha del intento y limpia notas; no
+elimina `Respuesta`, `RespuestaOpcion`, snapshots ni historiales. `IncidenteIntento`
+admite temporalmente `focus_lost` y `fullscreen_exit`; la etapa 3 ampliará el catálogo.
+
+La revisión de alumno está disponible sólo cuando el intento está `entregado` y
+`CorreccionConfirmada=1`. Hasta la política de revisión de la etapa 5, esa condición es
+la única habilitación y permite construir la devolución desde snapshots.
+
+## 10. Modelo de selección múltiple y justificación
+
+DDL: `migrations/20261013_respuestas_multiples_justificacion.sql`, posterior a
+`20261011_calificacion_intentos_telemetria.sql`. Verificación de sólo lectura:
+`scripts/verificar-respuestas-multiples-justificacion.sql`.
+
+`Pregunta` y `BancoPregunta` comparten:
+
+- `ModoJustificacion`: `sin_justificacion|opcional|obligatoria`.
+- `EstrategiaCorreccion`: `exacta|parcial_sin_penalizacion|parcial_penalizada`.
+- `TratamientoJustificacion`: `informativa|revision_manual`.
+- `ContenidoHash CHAR(64)`: SHA-256 de tipo, enunciado, configuración y opciones
+  ordenadas. No incluye IDs, puntaje, propietario ni procedencia.
+
+Los datos existentes reciben `sin_justificacion`, `exacta` e `informativa`. La
+migración completa snapshots de intentos previos desde el contenido disponible y los
+marca como reconstruidos; no modifica respuestas, puntajes ni notas.
+
+La etapa 2 requiere `migrations/20261014_runtime_respuestas_multiples.sql`; su verificador
+es `scripts/verificar-runtime-respuestas-multiples.sql`. Agrega `EnunciadoSnapshot` y
+`GrupoTituloSnapshot`, garantiza una sola `Respuesta` por intento/pregunta y actualiza
+los cuatro SP de runtime existentes. La selección continúa almacenándose en
+`RespuestaOpcion` por IDs originales, pero render y corrección resuelven texto y clave
+exclusivamente desde `IntentoPreguntaOpcionSnapshot`.
+
+`HistorialRespuestaCambio` contiene el estado anterior/nuevo sin claves correctas,
+UUID del cliente y revisiones consecutivas. El guardado serializable reemplaza el
+conjunto completo dentro de una transacción. La entrega valida justificaciones y
+calcula estrategias exacta/parciales sobre snapshots; `PuntajeAutomaticoOpciones`
+conserva el valor provisional cuando la justificación exige revisión manual.

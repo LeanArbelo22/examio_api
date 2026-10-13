@@ -129,6 +129,18 @@ export async function corregirPreguntaIntento(
       .input('ComentariosDocente', sql.NVarChar, input.comentariosDocente ?? null)
       .input('ModificadoPor', sql.Int, actor.id)
       .query(`
+        IF EXISTS (SELECT 1 FROM dbo.Intento WHERE Id=@IdIntento AND CorreccionConfirmada=1)
+        BEGIN
+          INSERT INTO dbo.HistorialEstadoCorreccionIntento
+            (IdIntento,EstadoAnterior,EstadoNuevo,Accion,ModificadoPor)
+          VALUES(@IdIntento,1,0,'reapertura_pregunta',@ModificadoPor);
+
+          UPDATE dbo.Intento
+          SET CorreccionConfirmada=0,CorreccionConfirmadaPor=NULL,
+              FechaCorreccionConfirmada=NULL,OrigenConfirmacionCorreccion=NULL
+          WHERE Id=@IdIntento;
+        END;
+
         INSERT INTO dbo.HistorialCorreccionIntentoPregunta
           (IdIntentoPregunta, PuntajeAnterior, PuntajeNuevo, ComentarioAnterior,
            ComentarioNuevo, OrigenAnterior, OrigenNuevo, ModificadoPor)
@@ -178,7 +190,7 @@ export async function corregirPreguntaIntento(
             NotaFinalCalculada = @NotaCalculada
         WHERE Id = @IdIntento;
 
-        SELECT IP.IdIntento, IP.IdPregunta, IP.PuntajeMaximoSnapshot,
+        SELECT IP.IdIntento, IP.IdPregunta, IP.PuntajeMaximoSnapshot,IP.PuntajeAutomaticoOpciones,
                IP.PuntajeObtenido, IP.OrigenCorreccion, IP.ComentariosDocente,
                IP.CorregidoPor, IP.FechaCorreccion,
                I.NotaAutomatica, I.NotaFinalCalculada, I.NotaFinalManual, I.NotaFinal,
@@ -234,6 +246,18 @@ export async function asignarNotaFinalManual(
       .input('NotaFinal', sql.Decimal(5, 2), notaFinal)
       .input('ModificadoPor', sql.Int, actor.id)
       .query(`
+        IF EXISTS (SELECT 1 FROM dbo.Intento WHERE Id=@IdIntento AND CorreccionConfirmada=1)
+        BEGIN
+          INSERT INTO dbo.HistorialEstadoCorreccionIntento
+            (IdIntento,EstadoAnterior,EstadoNuevo,Accion,ModificadoPor)
+          VALUES(@IdIntento,1,0,'reapertura_nota',@ModificadoPor);
+
+          UPDATE dbo.Intento
+          SET CorreccionConfirmada=0,CorreccionConfirmadaPor=NULL,
+              FechaCorreccionConfirmada=NULL,OrigenConfirmacionCorreccion=NULL
+          WHERE Id=@IdIntento;
+        END;
+
         INSERT INTO dbo.HistorialNotaIntento
           (IdIntento, NotaAnterior, NotaNueva, ModificadoPor)
         SELECT Id, COALESCE(NotaFinalManual, NotaFinal), @NotaFinal, @ModificadoPor

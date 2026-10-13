@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 407 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 432 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -603,6 +603,40 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
 }
 ```
 
+**Contrato `GET /api/docentes/:legajo/evaluaciones`:** devuelve una fila por
+publicación, sin agrupar, ordenada por `fechaFin DESC`. Un docente sólo puede
+consultar su propio legajo; `admin` conserva alcance global.
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "idPublicacion": 31,
+      "idActividad": 25,
+      "idMateria": 8,
+      "idMateriaDivision": 17,
+      "titulo": "Primer parcial",
+      "tipo": "evaluacion",
+      "duracionMinutos": 90,
+      "cantidadIntentosMaximos": 2,
+      "estado": "publicada",
+      "fechaInicio": "2026-10-20T12:00:00.000Z",
+      "fechaFin": "2026-10-20T13:30:00.000Z",
+      "materia": "Fundamentos de Redes de Datos",
+      "division": "1° A",
+      "carrera": "Tecnicatura Superior en Redes",
+      "alumnosInscriptos": 28,
+      "totalIntentos": 19
+    }
+  ]
+}
+```
+
+Los identificadores provienen directamente de `Actividad.Id`, `Materia.Id` y
+`MateriaDivision.Id`. `carrera` se resuelve mediante `Materia.IdCarrera`; el
+frontend puede agrupar por IDs sin depender de nombres potencialmente repetidos.
+
 ### 4.4 Carreras
 
 | Método | Endpoint | Zod | Roles |
@@ -748,6 +782,9 @@ ni inscripción masiva; esas reglas no se infieren en este endpoint.
         {
           "Enunciado": "¿Qué comando SELECT es correcto?",
           "Tipo": "mc",
+          "ModoJustificacion": "sin_justificacion",
+          "EstrategiaCorreccion": "exacta",
+          "TratamientoJustificacion": "informativa",
           "Opciones": [
             { "Texto": "SELECT * FROM users", "EsCorrecta": true },
             { "Texto": "SELECT all FROM users", "EsCorrecta": false }
@@ -852,6 +889,10 @@ La creación responde:
             "idPregunta": 10,
             "enunciado": "¿Qué comando SELECT es correcto?",
             "tipo": "mc",
+            "modoJustificacion": "sin_justificacion",
+            "estrategiaCorreccion": "exacta",
+            "tratamientoJustificacion": "informativa",
+            "contenidoHash": "<sha256-del-contenido>",
             "opciones": [
               { "idOpcion": 1, "texto": "SELECT * FROM users", "esCorrecta": true },
               { "idOpcion": 2, "texto": "SELECT all FROM users", "esCorrecta": false }
@@ -888,6 +929,52 @@ Esta funcionalidad requiere aplicar manualmente
 `migrations/20261011_calificacion_intentos_telemetria.sql`, después de las migraciones
 del banco y de revisión/idempotencia. Validar luego con
 `scripts/verificar-calificacion-intentos-telemetria.sql`. El backend no ejecuta DDL al arrancar.
+
+#### Selección múltiple y justificación — etapas 1 y 2
+
+Los borradores de evaluación y el banco admiten `Tipo="multiple"` y tres campos
+aditivos por pregunta:
+
+- `ModoJustificacion`: `sin_justificacion` (default), `opcional` u `obligatoria`.
+- `EstrategiaCorreccion`: `exacta` (default), `parcial_sin_penalizacion` o
+  `parcial_penalizada`. Las estrategias parciales sólo corresponden a `multiple`.
+- `TratamientoJustificacion`: `informativa` (default) o `revision_manual`. La revisión
+  manual exige una justificación opcional/obligatoria; `abierta` y `code` conservan
+  tratamiento informativo porque su respuesta principal ya se corrige manualmente.
+
+`multiple` disponible requiere al menos dos opciones y una correcta; puede tener más
+de una correcta. `ContenidoHash` es calculado por el servidor sobre tipo, enunciado,
+configuración y opciones ordenadas. Identifica contenido equivalente, no propiedad ni
+procedencia, y cambia cuando una copia se adapta.
+
+El runtime de la etapa 2 permite publicar estas configuraciones, congela enunciado,
+tipo, configuración y opciones al iniciar el intento, restaura la respuesta en progreso
+y guarda el conjunto completo de opciones de forma atómica. Los contratos legacy
+mantienen sus defaults.
+
+Requiere aplicar manualmente
+`migrations/20261013_respuestas_multiples_justificacion.sql` después de la migración
+de calificación y ejecutar
+`scripts/verificar-respuestas-multiples-justificacion.sql`. La migración prepara
+snapshots e historial, pero no recalifica ni modifica notas históricas.
+
+Después debe aplicarse `migrations/20261014_runtime_respuestas_multiples.sql` y
+ejecutarse `scripts/verificar-runtime-respuestas-multiples.sql`. Esta segunda migración
+actualiza los SP existentes de inicio, render, opciones y entrega; no crea SP nuevos.
+
+Reglas de autocorrección congeladas por intento:
+
+- `exacta`: máximo sólo al seleccionar todas las correctas y ninguna incorrecta.
+- `parcial_sin_penalizacion`: proporción de correctas seleccionadas sobre el total de
+  correctas, sin descontar distractores.
+- `parcial_penalizada`: resta además la proporción de distractores seleccionados y aplica
+  piso cero. Todos los resultados se redondean a dos decimales.
+
+Con `TratamientoJustificacion="informativa"`, el puntaje de opciones puede ser definitivo.
+Con `revision_manual`, se conserva en `puntajeAutomaticoOpciones` como valor provisional,
+pero `puntajeObtenido` queda pendiente hasta la corrección docente. Una pregunta contestada
+con justificación obligatoria no puede entregarse sin ella; guardar el borrador incompleto sí
+está permitido. Una pregunta totalmente omitida no exige justificación para entregar.
 
 #### Selección del intento académicamente válido — etapa 3
 
@@ -963,6 +1050,9 @@ script SQL adicional.
       "estadoIntento": "entregado",
       "notaFinal": null,
       "notaAutomatica": 8.00,
+      "correccionPendiente": true,
+      "correccionConfirmada": false,
+      "revisionDisponible": false,
       "fechaInicioIntento": "2026-06-15T10:00:00.000Z",
       "fechaFinIntento": "2026-06-15T11:30:00.000Z",
       "numeroIntento": 1,
@@ -1038,6 +1128,7 @@ script SQL adicional.
 | POST | `/api/intentos/iniciar` | `IniciarExamenSchema` | `alumno`, `admin` |
 | POST | `/api/intentos/guardar-respuesta` | `GuardarRespuestaSchema` | `alumno`, `admin` |
 | POST | `/api/intentos/:id/finalizar` | — | `alumno`, `admin` |
+| PUT | `/api/intentos/:idIntento/anular-por-incidente/:eventoId` | — | `alumno`, `admin` |
 | GET | `/api/intentos/mios` | `MisIntentosQuerySchema` (query) | `alumno` |
 | GET | `/api/intentos/alumno/:idAlumno` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/intentos/alumno/:idAlumno/detallados` | — | `alumno`, `admin`, `docente` |
@@ -1045,6 +1136,7 @@ script SQL adicional.
 | GET | `/api/intentos/:idIntento/completo` | — | `admin`, `docente`, `alumno`* |
 | **PUT** | `/api/intentos/:idIntento/calificar` | `CalificarSchema` | `admin`, `docente` |
 | **PUT** | `/api/intentos/:idIntento/preguntas/:idPregunta/corregir` | `CorregirRespuestaSchema` | `docente` |
+| **PUT** | `/api/intentos/:idIntento/confirmar-correccion` | — | `admin`, `docente` |
 
 **Body `POST /api/intentos/iniciar`:**
 
@@ -1111,6 +1203,9 @@ escalas 10/100.
         "notaAprobacion": 40,
         "resultado": "aprobado",
         "estadoCorreccion": "completa",
+        "correccionPendiente": false,
+        "correccionConfirmada": true,
+        "revisionDisponible": true,
         "esIntentoValido": true,
         "seleccionIntentoValido": "automatica"
       }
@@ -1149,7 +1244,9 @@ mantienen sin cambios por compatibilidad.
 >
 > ⚠️ Cada opción lleva `fueSeleccionada: true/false` para que el Frontend pueda pintar directamente cuál fue marcada, sin cruzar arrays.
 >
-> \* `alumno` — solo puede acceder a su propio intento (validación por titularidad `IdAlumno` vs. `req.user.idAlumno`).
+> \* `alumno` — sólo puede acceder a su propio intento y cuando la corrección está
+> confirmada. Antes recibe `409 REVIEW_NOT_AVAILABLE`; no se exponen preguntas,
+> respuestas, comentarios ni claves correctas.
 
 ```json
 {
@@ -1163,6 +1260,9 @@ mantienen sin cambios por compatibilidad.
     "notaAutomatica": 2.00,
     "notaFinalCalculada": null,
     "notaFinalManual": null,
+    "correccionPendiente": false,
+    "correccionConfirmada": true,
+    "revisionDisponible": true,
     "escalaCalificacion": 10,
     "notaAprobacion": 4,
     "fechaInicio": "2026-06-15T10:00:00.000Z",
@@ -1217,6 +1317,46 @@ mantienen sin cambios por compatibilidad.
 
 **Body `POST /api/intentos/guardar-respuesta`:**
 
+Contrato nuevo para selección múltiple, justificación, concurrencia optimista e
+idempotencia offline:
+
+```json
+{
+  "IdIntento": 1,
+  "IdPregunta": 10,
+  "IdOpcionesSeleccionadas": [3, 5],
+  "Justificacion": "Ambas condiciones se cumplen.",
+  "RevisionEsperada": 2,
+  "EventoId": "b0c1d99d-dac3-4ad7-b983-9c400267bd31"
+}
+```
+
+`EventoId` y `RevisionEsperada` se envían juntos. Repetir el mismo evento y contenido
+devuelve el resultado anterior sin duplicar cambios; reutilizarlo con otro contenido o
+guardar sobre una revisión obsoleta devuelve `409`. El array vacío representa una
+selección omitida y permite guardar borradores incompletos.
+
+Respuesta:
+
+```json
+{
+  "success": true,
+  "message": "Respuesta guardada y auditada correctamente.",
+  "data": {
+    "idRespuesta": 21,
+    "idIntento": 1,
+    "idPregunta": 10,
+    "idsOpcionesSeleccionadas": [3, 5],
+    "rtaTexto": null,
+    "justificacion": "Ambas condiciones se cumplen.",
+    "revision": 3,
+    "replay": false
+  }
+}
+```
+
+El contrato legacy de selección única se conserva:
+
 ```json
 {
   "IdIntento": 1,
@@ -1224,6 +1364,80 @@ mantienen sin cambios por compatibilidad.
   "IdOpcionNueva": 3
 }
 ```
+
+También continúa aceptándose `RtaTexto` para `abierta` y `code`. Las opciones deben
+pertenecer al snapshot de la pregunta y `mc`/`vf` admiten como máximo una. El alumno
+sólo puede modificar sus propios intentos en estado `en_progreso`.
+
+`GET /api/evaluaciones/intento/:idIntento/renderizar` agrega la configuración congelada
+y `respuesta` (`idsOpcionesSeleccionadas`, texto, justificación y revisión), sin exponer
+claves correctas. `GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento`
+renderiza texto y selección desde el snapshot; `esCorrecta` se omite para alumnos.
+
+`POST /api/intentos/:id/finalizar` conserva su body vacío e idempotencia. Puede devolver
+`409 REQUIRED_JUSTIFICATION_MISSING`; en ese caso el intento continúa `en_progreso` y
+ninguna nota fue modificada.
+
+Si todas las preguntas quedan autocorregidas con puntaje definitivo, la entrega confirma
+automáticamente la corrección y habilita la revisión. Si queda al menos un puntaje
+pendiente, `correccionConfirmada` permanece en `false`.
+
+#### Anulación autoritativa por incidente
+
+`PUT /api/intentos/:idIntento/anular-por-incidente/:eventoId` no recibe body. El evento
+debe existir previamente en `IncidenteIntento` y ser `focus_lost` o `fullscreen_exit`.
+El alumno sólo puede anular su propio intento en progreso; `admin` queda disponible para
+un proceso institucional autorizado sin introducir otro mecanismo de autenticación.
+
+```json
+{
+  "success": true,
+  "data": {
+    "idIntento": 1,
+    "eventoId": "550e8400-e29b-41d4-a716-446655440000",
+    "tipoIncidente": "focus_lost",
+    "motivo": "POLICY_FIRST_FOCUS_LOSS",
+    "estado": "anulado",
+    "replay": false
+  }
+}
+```
+
+La operación es serializable e idempotente por intento/evento. Un replay devuelve el
+mismo resultado; otro evento para un intento ya anulado devuelve
+`409 ATTEMPT_ALREADY_CANCELLED`. Se conservan todas las respuestas sincronizadas, se
+marca el intento como `anulado` y todas sus notas quedan en `null`. La política temporal
+vigente considera la primera pérdida detectada; el frontend debe sincronizar respuestas
+pendientes antes de solicitar la anulación.
+
+#### Confirmación de corrección
+
+`PUT /api/intentos/:idIntento/confirmar-correccion` tampoco recibe body. Requiere docente
+propietario de la comisión o administrador, un intento fuera de `en_progreso` y todas las
+preguntas con `PuntajeObtenido` definitivo. Si quedan pendientes devuelve
+`409 CORRECTION_INCOMPLETE`.
+
+```json
+{
+  "success": true,
+  "message": "Corrección confirmada correctamente",
+  "data": {
+    "idIntento": 1,
+    "correccionPendiente": false,
+    "correccionConfirmada": true,
+    "correccionConfirmadaPor": 7,
+    "fechaCorreccionConfirmada": "2026-10-15T15:30:00.000Z",
+    "origenConfirmacionCorreccion": "manual",
+    "revisionDisponible": true,
+    "replay": false
+  }
+}
+```
+
+Repetir la confirmación no duplica auditoría. Corregir una pregunta o modificar la nota
+después de confirmar vuelve a dejar la corrección pendiente y registra la reapertura.
+Durante esta etapa, confirmar un intento entregado habilita la revisión del alumno; la
+etapa 5 separará esa visibilidad mediante políticas y sesiones específicas.
 
 **Body `PUT /api/intentos/:idIntento/calificar`:**
 
@@ -1336,7 +1550,9 @@ Errores funcionales relevantes: `QUESTION_SCORE_OUT_OF_RANGE` (400),
 
 **Response `GET /api/intentos/alumno/:idAlumno/historial-corregido`:**
 
-> Solo devuelve intentos con `NotaFinal IS NOT NULL` y `Estado = 'entregado'`. Excluye exámenes con preguntas abiertas pendientes de corrección manual.
+> Devuelve intentos con `NotaFinal IS NOT NULL` y `Estado = 'entregado'`. La presencia
+> de una nota manual no habilita por sí sola la devolución: el frontend debe usar
+> `correccionConfirmada` y `revisionDisponible`.
 
 ```json
 {
@@ -1349,7 +1565,10 @@ Errores funcionales relevantes: `QUESTION_SCORE_OUT_OF_RANGE` (400),
       "division": "1NMS",
       "fechaFin": "2026-06-15T11:30:00.000Z",
       "notaFinal": 8.00,
-      "numeroIntento": 1
+      "numeroIntento": 1,
+      "correccionPendiente": false,
+      "correccionConfirmada": true,
+      "revisionDisponible": true
     }
   ]
 }
@@ -1419,7 +1638,7 @@ Errores funcionales relevantes: `QUESTION_SCORE_OUT_OF_RANGE` (400),
 ```
 
 Los endpoints `alerta` y `navegacion` se conservan como contratos legacy. La pérdida
-de foco con duración usa un `eventoId` UUID generado por el cliente y un `PUT`
+de foco o salida de pantalla completa usa un `eventoId` UUID generado por el cliente y un `PUT`
 naturalmente idempotente.
 
 **Inicio de pérdida de foco:**
@@ -1978,7 +2197,7 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | `NavegacionSchema` | `IdIntento` | `z.number().int()` | Sí |
 | | `IdPregunta` | `z.number().int()` | Sí |
 | | `SegundosPermanencia` | `z.number().int()` | Sí |
-| `IncidenteFocoSchema` | `Tipo` | literal `focus_lost` | Sí |
+| `IncidenteFocoSchema` | `Tipo` | `focus_lost`, `fullscreen_exit` | Sí |
 | | `FechaInicioCliente` | timestamp ISO 8601 | Inicio sí; finalización posterior no |
 | | `FechaFinCliente` | timestamp ISO 8601 | No; debe acompañar duración |
 | | `DuracionMilisegundos` | entero seguro no negativo | No; debe acompañar fecha fin |
@@ -2034,7 +2253,10 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | Esquema | Campo | Valores |
 |---|---|---|
 | `ActividadSchema` | `Tipo` | `'evaluacion'`, `'tp'`, `'tarea'` |
-| `VarianteSchema` (anidado) | `Tipo` | `'mc'`, `'vf'`, `'abierta'`, `'code'` |
+| `VarianteSchema` (anidado) | `Tipo` | `'mc'`, `'multiple'`, `'vf'`, `'abierta'`, `'code'` |
+| | `ModoJustificacion` | `'sin_justificacion'`, `'opcional'`, `'obligatoria'` |
+| | `EstrategiaCorreccion` | `'exacta'`, `'parcial_sin_penalizacion'`, `'parcial_penalizada'` |
+| | `TratamientoJustificacion` | `'informativa'`, `'revision_manual'` |
 | `DetalleActaSchema` | `CondicionFinal` | `'regular'`, `'promocionado'`, `'libre'` |
 | `UsuarioSchema` / `UsuarioUpdateSchema` | `Rol` | `'admin'`, `'docente'`, `'alumno'` |
 
@@ -2046,7 +2268,7 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (407 tests de referencia actual)
+npm test            # Suite completa (432 tests de referencia actual)
 npx jest --verbose  # Reporte detallado
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
@@ -2143,7 +2365,7 @@ rotatorios. Permanecen dos tareas operativas:
 | `GET /api/docentes/:legajo/comisiones` | `getComisionesByDocente` | `SP_Docente_VerMaterias` |
 | `GET /api/docentes/:legajo/materias` | `getMateriasByDocente` | `SP_Docente_VerMaterias` |
 
-Ambos endpoints ejecutan el mismo SP (`SP_Docente_VerMaterias`), por lo que devuelven datos idénticos. Es un error por copy-paste. `getMateriasByDocente` debería llamar a un SP diferente (ej. `SP_Docente_ObtenerMaterias`) o ejecutar una query directa que retorne solo las materias del docente.
+Ambos endpoints ejecutan el mismo SP (`SP_Docente_VerMaterias`), por lo que devuelven datos idénticos. Es un error por copy-paste. `getMateriasByDocente` debería llamar a un SP diferente (ej. `SP_Docente_ObtenerMaterias`) o ejecutar una query directa que retorne solo las materias del docente. La navegación de evaluaciones no depende de estos endpoints: `GET /api/docentes/:legajo/evaluaciones` ya devuelve los IDs y nombres de materia, comisión y carrera necesarios para agrupar en el frontend.
 
 **Fix pendiente:** Corregir `getMateriasByDocente` para que consulte datos de materias (no comisiones).
 
@@ -2199,6 +2421,9 @@ Pregunta de ejemplo:
   "Enunciado": "¿Cuál de estos es un protocolo de transporte?",
   "Tipo": "mc",
   "Estado": "disponible",
+  "ModoJustificacion": "sin_justificacion",
+  "EstrategiaCorreccion": "exacta",
+  "TratamientoJustificacion": "informativa",
   "Opciones": [
     { "Texto": "TCP", "EsCorrecta": true },
     { "Texto": "RAM", "EsCorrecta": false }
@@ -2236,6 +2461,7 @@ Body de etiqueta: `{ "Nombre": "Redes" }`.
 
 - Enunciado no vacío.
 - `mc`: al menos dos opciones, textos no vacíos y exactamente una correcta.
+- `multiple`: al menos dos opciones, textos no vacíos y al menos una correcta.
 - `vf`: exactamente `Verdadero` y `Falso` (sin distinción de mayúsculas), una correcta.
 - `abierta`: sin opciones.
 - `code`: no habilitado para uso en v1; puede conservarse como borrador.
@@ -2381,8 +2607,10 @@ En una única transacción: bloquea y autoriza la actividad, comprueba revisión
 de intentos, guarda la última edición, resuelve importaciones, valida desde SQL la
 estructura final, opcionalmente resuelve el banco, publica e incrementa la revisión.
 La validación autoritativa exige ventana no vencida, al menos un grupo y una variante,
-enunciados completos, `mc` con dos opciones y una correcta, `vf` con Verdadero/Falso
-y una correcta, y `abierta`/`code` sin opciones. `code` puede publicarse en evaluación,
+enunciados completos, `mc` con dos opciones y una correcta, `multiple` con dos opciones
+y al menos una correcta, `vf` con Verdadero/Falso y una correcta, y `abierta`/`code`
+sin opciones. El runtime de etapa 2 permite publicar justificaciones y estrategias
+de selección múltiple. `code` puede publicarse en evaluación,
 pero al copiarse al banco queda como borrador.
 
 Con `GuardarTodoEnBanco=true`, una referencia se reutiliza solo si contenido, estado
@@ -2426,7 +2654,7 @@ al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
 Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
 
 Validación local de esta entrega: `npm test -- --runInBand` y
-`npx jest --runInBand --detectOpenHandles`, ambos con 21 suites/407 pruebas. El puerto
+`npx jest --runInBand --detectOpenHandles`, ambos con 21 suites/432 pruebas. El puerto
 55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
 global preexistente (`rootDir` sin `include`, y después la incompatibilidad
 NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server

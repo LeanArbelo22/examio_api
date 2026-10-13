@@ -119,6 +119,23 @@ describe('Etapa 6 - incidentes de pérdida de foco', () => {
     expect(mock.pool.Transaction.mock.results.at(-1)?.value.commit).toHaveBeenCalled();
   });
 
+  it('acepta salida de pantalla completa en el contrato previo a telemetría general', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [alcance()] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [incidente({ Tipo: 'fullscreen_exit' })] });
+
+    const res = await auth(request(app)
+      .put(`/api/telemetria/intentos/15/incidentes/${eventoId}`)
+      .send({ ...inicioBody(), Tipo: 'fullscreen_exit' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.tipo).toBe('fullscreen_exit');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith(
+      'Tipo', expect.anything(), 'fullscreen_exit',
+    );
+  });
+
   it('permite completar el evento en una llamada posterior', async () => {
     const terminado = incidente({
       FechaFinCliente: fechaFinEvento,

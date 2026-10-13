@@ -21,6 +21,18 @@ su alcance. No reemplaza los contratos de `README.md`, el modelo de
 - No registrar ni persistir tokens, contraseñas, hashes o secretos reutilizables.
 - Reflejar en README únicamente comportamiento efectivo y verificado.
 
+## Navegación docente por evaluaciones
+
+**Estado: COMPLETADA**
+
+- [x] Ampliar aditivamente `GET /api/docentes/:legajo/evaluaciones` con IDs de
+  actividad, materia y comisión, más carrera obtenida por la relación real.
+- [x] Mantener una fila por publicación, los campos legacy y el orden por fecha de fin.
+- [x] Restringir al docente autenticado a su propio legajo; admin conserva alcance global.
+- [x] Cubrir comisiones múltiples, materias homónimas, aislamiento y respuesta vacía.
+- [x] Mantener documentado, fuera de alcance, el SP duplicado de `/materias` y
+  `/comisiones`.
+
 ## Calificación configurable — etapa 1
 
 **Estado: COMPLETADA — SQL APLICADO Y VERIFICADO EN BASE DE PRUEBA**
@@ -142,8 +154,34 @@ La etapa reutiliza la migración ya aplicada
 La etapa reutiliza la migración ya aplicada
 `20261011_calificacion_intentos_telemetria.sql`; no requiere otro script SQL.
 
-**Siguiente trabajo funcional:** definir con producto la política de revisión del examen
-por alumno. Continúan fuera de alcance las consecuencias automáticas por telemetría.
+## Evolución — etapa previa a telemetría temporal
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE SQL REAL E INTEGRACIÓN FRONTEND**
+
+- [x] Agregar anulación autoritativa e idempotente vinculada a un `EventoId` existente.
+- [x] Restringir la operación al alumno titular o administrador autorizado.
+- [x] Exigir intento en progreso, conservar respuestas y mantener todas las notas nulas.
+- [x] Ampliar aditivamente el incidente actual con `fullscreen_exit`.
+- [x] Persistir y auditar confirmación automática/manual de la corrección.
+- [x] Exigir puntajes definitivos antes de la confirmación docente.
+- [x] Reabrir la corrección al modificar una pregunta o la nota después de confirmar.
+- [x] Exponer `correccionConfirmada` y `revisionDisponible` en el historial propio.
+- [x] Bloquear con `REVIEW_NOT_AVAILABLE` el intento completo del alumno no confirmado.
+- [x] Exponer claves correctas al alumno únicamente después de la confirmación.
+- [x] Agregar migración idempotente y verificador de sólo lectura.
+- [x] Agregar cobertura HTTP focalizada de replay, RBAC, pendientes y revisión segura.
+- [ ] Aplicar dos veces `20261015_anulacion_confirmacion_revision.sql` en SQL Server
+  de prueba y ejecutar `verificar-anulacion-confirmacion-revision.sql`.
+- [ ] Probar desde el frontend: sincronizar respuestas, registrar incidente, anular y
+  confirmar/reabrir correcciones.
+- [ ] Probar anulación y confirmación concurrentes contra SQL Server real.
+
+La consecuencia temporal se activa sólo mediante el endpoint explícito de anulación;
+registrar un incidente por sí solo continúa sin modificar el intento. La etapa 3
+generalizará eventos y tiempos; la etapa 5 reemplazará la habilitación directa por una
+política y sesiones de revisión.
+
+**Siguiente trabajo funcional:** etapa 3, telemetría temporal confiable.
 
 ---
 
@@ -278,6 +316,25 @@ separada y documentada.
 Implementar la fase 1 empezando por tests unitarios/HTTP que no requieren SQL
 real. Diseñar por separado el test opt-in de concurrencia contra SQL Server para
 no degradar el aislamiento de la suite Jest estándar.
+
+## Evolución: selección múltiple y justificación
+
+### Etapa 1 — modelo y edición
+
+- [x] Tipo `multiple` y configuración de justificación/corrección en schemas.
+- [x] Persistencia y copia bidireccional en evaluación y banco.
+- [x] Hash de contenido independiente de IDs y procedencia.
+- [x] Migración idempotente con preparación de respuesta, snapshots e historial.
+- [x] Bloqueo 409 al publicar contenido cuyo runtime corresponde a la etapa 2.
+- [x] Cobertura HTTP focalizada y documentación.
+- [ ] Reaplicar dos veces la versión corregida de
+  `20261013_respuestas_multiples_justificacion.sql` en SQL Server de prueba y ejecutar
+  su verificador. La primera aplicación dejó vigente `CHK_Pregunta_Tipo` y un check
+  autogenerado de `BancoPregunta` que todavía bloqueaban `multiple`.
+- [x] Etapa 2 backend: render inmutable, guardado atómico/revisionado, entrega y
+  corrección del nuevo modelo, con compatibilidad legacy y cobertura HTTP.
+- [ ] Aplicar dos veces `20261014_runtime_respuestas_multiples.sql` en SQL Server de
+  prueba y ejecutar `verificar-runtime-respuestas-multiples.sql`.
 
 ---
 
@@ -466,9 +523,9 @@ evaluaciones, además del detalle por publicación. No implementado en esta entr
 
 ### Evidencia de validación local
 
-- Suite completa actual: **21 suites / 407 pruebas aprobadas**, también con
-  `--runInBand --detectOpenHandles`; Jest finaliza naturalmente sin `--forceExit`.
-- Suite del banco: **62 pruebas aprobadas**; incluye integración HTTP de copias
+- Suite completa actual: **21 suites / 432 pruebas aprobadas**, también con
+  `--runInBand --detectOpenHandles`. Jest finaliza naturalmente sin `--forceExit`.
+- Suite del banco: **66 pruebas aprobadas**; incluye integración HTTP de copias
   durante creación/edición, rollback, conflictos y aislamiento.
 - Comprobación estática focalizada sin emisión: sin diagnósticos nuevos en banco/autorización
   tras excluir la falta de declaraciones `mssql` ya documentada. No se modificó tsconfig

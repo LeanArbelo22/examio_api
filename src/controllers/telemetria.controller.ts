@@ -4,12 +4,20 @@ import * as sql from 'mssql';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
 import { ZodError } from 'zod';
 import { ActorBanco, BancoError, atomico } from '../services/banco-common.service';
-import { EventoIdSchema, IdIntentoTelemetriaSchema } from '../schemas/telemetria.schema';
+import {
+  EventoIdSchema,
+  EventoTemporalLoteItemSchema,
+  EventoTemporalSchema,
+  IdIntentoTelemetriaSchema,
+  ListaEventosTemporalesQuerySchema,
+  LoteEventosTemporalesSchema,
+} from '../schemas/telemetria.schema';
 import {
   guardarIncidenteFoco,
   listarIncidentesFoco,
   resumirIncidentesFoco,
 } from '../services/telemetria-focus.service';
+import { guardarEventoTemporal, listarEventosTemporales } from '../services/telemetria-temporal.service';
 
 type ActorTelemetria = ActorBanco & { idAlumno?: number | null };
 
@@ -103,6 +111,79 @@ export const getIncidentesByIntento = async (req: Request, res: Response) => {
     const actor = (req as Request & { user: ActorTelemetria }).user;
     const data = await listarIncidentesFoco(actor, idIntento);
     return res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) {
+    return responderErrorTelemetria(res, error);
+  }
+};
+
+export const registrarEventoTemporal = async (req: Request, res: Response) => {
+  try {
+    const idIntento = IdIntentoTelemetriaSchema.parse(req.params.idIntento);
+    const eventoId = EventoIdSchema.parse(req.params.eventoId);
+    const input = EventoTemporalSchema.parse(req.body);
+    const actor = (req as Request & { user: ActorTelemetria }).user;
+    const data = await atomico(tx => guardarEventoTemporal(tx, actor, idIntento, eventoId, input));
+    return res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) {
+    return responderErrorTelemetria(res, error);
+  }
+};
+
+export const registrarEventosTemporalesLote = async (req: Request, res: Response) => {
+  try {
+    const idIntento = IdIntentoTelemetriaSchema.parse(req.params.idIntento);
+    const { Eventos } = LoteEventosTemporalesSchema.parse(req.body);
+    const actor = (req as Request & { user: ActorTelemetria }).user;
+    const resultados: Record<string, unknown>[] = [];
+
+    for (const raw of Eventos) {
+      const parsed = EventoTemporalLoteItemSchema.safeParse(raw);
+      if (!parsed.success) {
+        resultados.push({
+          eventoId: typeof (raw as any)?.EventoId === 'string' ? (raw as any).EventoId : null,
+          resultado: 'rechazado',
+          codigo: 'REQUEST_INVALID',
+          errores: parsed.error.issues,
+        });
+        continue;
+      }
+      const { EventoId, ...input } = parsed.data;
+      try {
+        const data = await atomico(tx => guardarEventoTemporal(tx, actor, idIntento, EventoId, input));
+        resultados.push(mapKeysToCamelCase({ EventoId, ...data }) as Record<string, unknown>);
+      } catch (error) {
+        if (error instanceof BancoError) {
+          resultados.push({
+            eventoId: EventoId,
+            resultado: error.status === 409 ? 'conflicto' : 'rechazado',
+            codigo: error.code ?? 'TELEMETRY_EVENT_REJECTED',
+            message: error.message,
+          });
+        } else {
+          console.error('[telemetria] Error de persistencia en elemento de lote');
+          resultados.push({
+            eventoId: EventoId,
+            resultado: 'rechazado',
+            codigo: 'TELEMETRY_PERSISTENCE_ERROR',
+            message: 'No se pudo completar la operación',
+          });
+        }
+      }
+    }
+
+    return res.json({ success: true, data: { resultados } });
+  } catch (error) {
+    return responderErrorTelemetria(res, error);
+  }
+};
+
+export const getEventosTemporales = async (req: Request, res: Response) => {
+  try {
+    const idIntento = IdIntentoTelemetriaSchema.parse(req.params.idIntento);
+    const query = ListaEventosTemporalesQuerySchema.parse(req.query);
+    const actor = (req as Request & { user: ActorTelemetria }).user;
+    const data = await listarEventosTemporales(actor, idIntento, query.pagina, query.limite);
+    return res.json({ success: true, data });
   } catch (error) {
     return responderErrorTelemetria(res, error);
   }

@@ -19,6 +19,7 @@ import usuariosRoutes from './routes/usuarios.routes';
 import reportesRoutes from './routes/reportes.routes';
 import healthRoutes from './routes/health.routes';
 import bancoRoutes from './routes/banco.routes';
+import revisionesRoutes from './routes/revisiones.routes';
 
 const app = express();
 
@@ -42,5 +43,6 @@ app.use('/api/intentos', intentosRoutes);
 app.use('/api/telemetria', telemetriaRoutes);
 app.use('/api/usuarios', usuariosRoutes);
 app.use('/api/reportes', reportesRoutes);
+app.use('/api/revisiones', revisionesRoutes);
 
 export { app };

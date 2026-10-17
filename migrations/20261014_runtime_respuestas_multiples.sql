@@ -115,7 +115,7 @@ BEGIN TRY
   AS
   BEGIN
     SET NOCOUNT ON;
-    SELECT IP.IdPregunta,
+    SELECT IP.Id AS IdIntentoPregunta,IP.IdPregunta,
       COALESCE(IP.EnunciadoSnapshot,P.Enunciado) AS Enunciado,
       COALESCE(IP.TipoSnapshot,P.Tipo) AS Tipo,
       COALESCE(IP.GrupoTituloSnapshot,GP.TituloReferencia) AS GrupoConceptualmente,

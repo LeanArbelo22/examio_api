@@ -1,5 +1,6 @@
 import * as sql from 'mssql';
 import { ActorBanco, BancoError, atomico, DbBanco } from './banco-common.service';
+import { evaluarDisponibilidadRevisionEnDb } from './revision-examen.service';
 
 type ScopeIntentoEstado = {
   IdIntento: number;
@@ -140,6 +141,7 @@ export async function confirmarCorreccionIntento(actor: ActorBanco, idIntento: n
       throw new BancoError(409, 'Todavía existen preguntas sin puntaje definitivo', 'CORRECTION_INCOMPLETE');
     }
     if (Boolean(scope.CorreccionConfirmada)) {
+      const disponibilidad = await evaluarDisponibilidadRevisionEnDb(tx, idIntento);
       return {
         IdIntento: scope.IdIntento,
         CorreccionPendiente: false,
@@ -147,7 +149,7 @@ export async function confirmarCorreccionIntento(actor: ActorBanco, idIntento: n
         CorreccionConfirmadaPor: scope.CorreccionConfirmadaPor,
         FechaCorreccionConfirmada: scope.FechaCorreccionConfirmada,
         OrigenConfirmacionCorreccion: scope.OrigenConfirmacionCorreccion,
-        RevisionDisponible: scope.Estado === 'entregado',
+        RevisionDisponible: disponibilidad.RevisionDisponible,
         Replay: true,
       };
     }
@@ -168,10 +170,10 @@ export async function confirmarCorreccionIntento(actor: ActorBanco, idIntento: n
         SELECT Id AS IdIntento,CAST(0 AS bit) AS CorreccionPendiente,
                CorreccionConfirmada,CorreccionConfirmadaPor,FechaCorreccionConfirmada,
                OrigenConfirmacionCorreccion,
-               CAST(CASE WHEN Estado='entregado' THEN 1 ELSE 0 END AS bit) AS RevisionDisponible,
                CAST(0 AS bit) AS Replay
         FROM dbo.Intento WHERE Id=@IdIntento;
       `);
-    return result.recordset[0];
+    const disponibilidad = await evaluarDisponibilidadRevisionEnDb(tx, idIntento);
+    return { ...result.recordset[0], RevisionDisponible: disponibilidad.RevisionDisponible };
   });
 }

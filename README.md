@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 432 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 479 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -748,6 +748,10 @@ frontend puede agrupar por IDs sin depender de nombres potencialmente repetidos.
 | GET | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intentos` | — | `alumno`*, `admin`, `docente` |
 | PUT | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido` | `SeleccionarIntentoValidoSchema` | `admin`, `docente` |
 | DELETE | `/api/evaluaciones/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido` | — | `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/politica-revision` | — | `admin`, `docente` |
+| PUT | `/api/evaluaciones/publicaciones/:idPublicacion/politica-revision` | `PoliticaRevisionSchema` | `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/permisos-revision` | query | `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/auditoria-revision` | query | `admin`, `docente` |
 | GET | `/api/evaluaciones/:id/detalle` | — | `admin`, `docente` |
 | GET | `/api/evaluaciones/:id/alumnos` | — | `admin`, `docente` |
 
@@ -1134,6 +1138,9 @@ script SQL adicional.
 | GET | `/api/intentos/alumno/:idAlumno/detallados` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/intentos/alumno/:idAlumno/historial-corregido` | — | `alumno`, `admin`, `docente` |
 | GET | `/api/intentos/:idIntento/completo` | — | `admin`, `docente`, `alumno`* |
+| GET | `/api/intentos/:idIntento/revision-disponible` | — | `admin`, `docente`, `alumno` |
+| PUT | `/api/intentos/:idIntento/permiso-revision` | `PermisoRevisionSchema` | `admin`, `docente` |
+| DELETE | `/api/intentos/:idIntento/permiso-revision` | — | `admin`, `docente` |
 | **PUT** | `/api/intentos/:idIntento/calificar` | `CalificarSchema` | `admin`, `docente` |
 | **PUT** | `/api/intentos/:idIntento/preguntas/:idPregunta/corregir` | `CorregirRespuestaSchema` | `docente` |
 | **PUT** | `/api/intentos/:idIntento/confirmar-correccion` | — | `admin`, `docente` |
@@ -1244,9 +1251,10 @@ mantienen sin cambios por compatibilidad.
 >
 > ⚠️ Cada opción lleva `fueSeleccionada: true/false` para que el Frontend pueda pintar directamente cuál fue marcada, sin cruzar arrays.
 >
-> \* `alumno` — sólo puede acceder a su propio intento y cuando la corrección está
-> confirmada. Antes recibe `409 REVIEW_NOT_AVAILABLE`; no se exponen preguntas,
-> respuestas, comentarios ni claves correctas.
+> \* `alumno` — la ruta se conserva por compatibilidad de autorización, pero ya no
+> entrega contenido al alumno. Para un intento propio responde siempre `409
+> REVIEW_SESSION_REQUIRED`; para uno ajeno, `403`. El alumno debe usar una sesión de
+> revisión. Docentes y administradores conservan el acceso histórico completo.
 
 ```json
 {
@@ -1369,9 +1377,11 @@ También continúa aceptándose `RtaTexto` para `abierta` y `code`. Las opciones
 pertenecer al snapshot de la pregunta y `mc`/`vf` admiten como máximo una. El alumno
 sólo puede modificar sus propios intentos en estado `en_progreso`.
 
-`GET /api/evaluaciones/intento/:idIntento/renderizar` agrega la configuración congelada
-y `respuesta` (`idsOpcionesSeleccionadas`, texto, justificación y revisión), sin exponer
-claves correctas. `GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento`
+`GET /api/evaluaciones/intento/:idIntento/renderizar` devuelve en cada fila tanto
+`idIntentoPregunta` (instancia sorteada estable, requerida por `question_active`) como
+`idPregunta` (pregunta de origen), además de la configuración congelada y `respuesta`
+(`idsOpcionesSeleccionadas`, texto, justificación y revisión), sin exponer claves
+correctas. `GET /api/evaluaciones/pregunta/:idPregunta/opciones/:idIntento`
 renderiza texto y selección desde el snapshot; `esCorrecta` se omite para alumnos.
 
 `POST /api/intentos/:id/finalizar` conserva su body vacío e idempotencia. Puede devolver
@@ -1616,6 +1626,9 @@ Errores funcionales relevantes: `QUESTION_SCORE_OUT_OF_RANGE` (400),
 | PUT | `/api/telemetria/intentos/:idIntento/incidentes/:eventoId` | `IncidenteFocoSchema` | `alumno`, `admin` |
 | GET | `/api/telemetria/intentos/:idIntento/resumen` | — | `docente`, `admin` |
 | GET | `/api/telemetria/intentos/:idIntento/incidentes` | — | `docente`, `admin` |
+| PUT | `/api/telemetria/intentos/:idIntento/eventos/:eventoId` | `EventoTemporalSchema` | `alumno`, `admin` |
+| POST | `/api/telemetria/intentos/:idIntento/eventos/lote` | `LoteEventosTemporalesSchema` | `alumno`, `admin` |
+| GET | `/api/telemetria/intentos/:idIntento/eventos?pagina=1&limite=50` | query | `docente`, `admin` |
 
 **Body `POST /api/telemetria/alerta`:**
 
@@ -1700,6 +1713,105 @@ Errores funcionales nuevos: `FOCUS_EVENT_INVALID` (400),
 `FOCUS_EVENT_SCOPE_FORBIDDEN` (403), `FOCUS_EVENT_NOT_FOUND` (404),
 `FOCUS_EVENT_CONFLICT`, `FOCUS_EVENT_NOT_STARTED` y
 `FOCUS_EVENT_SYNC_WINDOW_EXPIRED` (409).
+
+#### Telemetría temporal confiable
+
+Los endpoints `/eventos` constituyen el contrato nuevo y requieren la migración
+`20261016_telemetria_temporal.sql`. Los contratos legacy anteriores se mantienen sin
+cambios: responden `200`, sus listados no se paginan y conservan la ventana de siete
+días.
+
+Cada evento usa un `eventoId` UUID, una sesión cliente UUID y una secuencia estable.
+Para un intervalo, el cliente puede enviar inicio y cierre juntos o cerrar luego el
+mismo evento. Los eventos puntuales sólo llevan `FechaInicioCliente`; el servidor los
+persiste completados con duración cero.
+
+```json
+{
+  "Tipo": "question_active",
+  "IdIntentoPregunta": 83,
+  "SesionClienteId": "50f8b18c-c03a-46fd-b830-ea3fc2d53f50",
+  "SecuenciaCliente": 12,
+  "FechaInicioCliente": "2026-10-14T14:05:00.000Z",
+  "FechaFinCliente": "2026-10-14T14:05:38.500Z",
+  "DuracionMilisegundos": 38500,
+  "VersionContrato": 1
+}
+```
+
+Tipos v1: `question_active`, `focus_lost`, `fullscreen_exit`,
+`connectivity_lost`, `auth_session_unavailable`, `exam_resumed`, `page_reload`,
+`sync_error`, `submission_failed` y `attempt_finished`. Sólo `question_active`
+acepta y exige `IdIntentoPregunta`. `Codigo` es opcional, máximo 50 caracteres, y
+sólo admite letras, números, punto, guion y guion bajo. El body es estricto: no admite
+respuestas, opciones, claves, tokens ni detalles libres.
+
+`PUT` responde siempre `200` en éxito. `data.resultado` es `creado`, `actualizado` o
+`replay`. Un UUID con contenido incompatible, una secuencia reutilizada o un orden
+temporal imposible responde `409`; un evento inválido responde `400`. La recepción del
+servidor se registra separadamente. El reloj cliente admite ±5 minutos, la duración
+puede diferir hasta dos segundos y la sincronización nueva vence siete días después de
+cerrado el intento. Un replay idéntico ya guardado sigue siendo válido después de esa
+ventana.
+
+Errores estables: `TELEMETRY_EVENT_INVALID`, `TELEMETRY_TYPE_INVALID` y
+`TELEMETRY_QUESTION_INVALID` (400); `TELEMETRY_SCOPE_FORBIDDEN` (403);
+`TELEMETRY_ATTEMPT_NOT_FOUND` (404 para administrador); y
+`TELEMETRY_EVENT_CONFLICT`, `TELEMETRY_SEQUENCE_CONFLICT`,
+`TELEMETRY_ORDER_CONFLICT`, `TELEMETRY_EVENT_NOT_STARTED` y
+`TELEMETRY_SYNC_WINDOW_EXPIRED` (409).
+
+El lote acepta de 1 a 500 elementos. Cada elemento agrega `EventoId` al contrato
+anterior y se procesa en una transacción independiente:
+
+```json
+{
+  "Eventos": [
+    {
+      "EventoId": "f26b4118-1270-4ca0-a311-e54021cc9924",
+      "Tipo": "page_reload",
+      "SesionClienteId": "50f8b18c-c03a-46fd-b830-ea3fc2d53f50",
+      "SecuenciaCliente": 13,
+      "FechaInicioCliente": "2026-10-14T14:06:00.000Z",
+      "VersionContrato": 1
+    }
+  ]
+}
+```
+
+El lote responde `200` con `data.resultados`; cada elemento informa `creado`,
+`actualizado`, `replay`, `conflicto` o `rechazado`. Un elemento inválido no revierte ni
+impide los demás.
+
+`GET /eventos` usa `pagina` (default 1) y `limite` (default 50, máximo 100), ordena por
+inicio e ID y devuelve:
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [],
+    "resumen": {
+      "total": 0,
+      "intervalosAbiertos": 0,
+      "duracionesPorTipo": [],
+      "tiemposPorPregunta": []
+    },
+    "paginacion": {
+      "pagina": 1,
+      "limite": 50,
+      "total": 0,
+      "totalPaginas": 0
+    }
+  }
+}
+```
+
+Los intervalos abiertos no suman duración. Los completados que se superponen se unen
+antes de sumar. Para cada pregunta, `fuente` vale `nueva`, `legacy` o `sin_datos`;
+`MetricasNavegacion` sólo se usa como fallback cuando esa pregunta no posee intervalos
+`question_active`. Registrar telemetría no modifica nota, estado ni intento válido; la
+anulación continúa siendo una operación separada.
 
 ### 4.12 Usuarios
 
@@ -2124,6 +2236,240 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ---
 
+### 4.16 Reportes — Rendimiento por pregunta, grupo y opciones
+
+| Método | Endpoint | Roles |
+|---|---|---|
+| GET | `/api/reportes/rendimiento-preguntas` | `admin`, `docente` |
+| GET | `/api/reportes/rendimiento-grupos` | `admin`, `docente` |
+| GET | `/api/reportes/rendimiento-preguntas/:idPregunta/opciones` | `admin`, `docente` |
+
+Los tres endpoints usan SQL por conjuntos. Los KPIs se calculan sobre todo el conjunto
+autorizado y filtrado; `items` contiene sólo la página solicitada. Un docente queda
+limitado por el `idDocente` de su JWT a `MateriaDivision.IdDocente`; un administrador
+posee alcance institucional y un alumno recibe `403`.
+
+#### Filtros
+
+Todos son opcionales y se combinan con AND: `idMateria`, `idMateriaDivision`,
+`idActividad`, `idPublicacion`, `idGrupoPregunta`, `fechaDesde`, `fechaHasta`,
+`estadoIntento`, `alcanceIntentos`, `estadoCorreccion`, `pagina`, `limite`,
+`ordenarPor` y `ordenDireccion`. `rendimiento-preguntas` admite además `idPregunta`;
+el detalle de opciones recibe ese ID exclusivamente en el path.
+
+- `estadoIntento`: `en_progreso|entregado|vencido|anulado`.
+- `alcanceIntentos`: `todos` (default) o `validos`. El segundo usa el override manual
+  o el último intento entregado con desempate estable.
+- `estadoCorreccion`: `todas` (default), `pendiente` o `confirmada`.
+- `pagina`: default 1. `limite`: default 25, máximo 100.
+- `ordenDireccion`: `asc|desc`, default `desc`.
+- Preguntas y grupos permiten ordenar por nombre, presentadas, respondidas, omitidas,
+  pendientes, tasa de acierto, porcentaje de puntaje o tiempo promedio. Opciones permiten
+  `posicion`, `selecciones` o `porcentajeSeleccion`.
+
+Los desempates son estables por hash/ID. Un filtro explícito fuera del alcance docente
+devuelve `403 REPORT_SCOPE_FORBIDDEN` sin revelar si el recurso existe para otro docente.
+
+#### Definiciones
+
+- Presentada: existe `IntentoPregunta`; respondida: existe texto u opción principal.
+  Una justificación sola no convierte una pregunta omitida en respondida.
+- Pendiente: puntaje de pregunta nulo; el filtro confirmado exige además que el intento
+  tenga `CorreccionConfirmada=1`.
+- Correcta, parcial e incorrecta comparan decimales contra `PuntajeMaximoSnapshot`.
+- El porcentaje es `PuntajeObtenido / PuntajeMaximoSnapshot * 100`, por lo que puede
+  combinar actividades de escalas 10 y 100 sin promediar notas crudas.
+- La tasa de acierto usa sólo preguntas corregidas como denominador.
+- La identidad histórica es `ContenidoHashSnapshot`. Si un snapshot legacy no tiene hash,
+  se mantiene separado mediante su `idPregunta`; no se reinterpreta como contenido nuevo.
+- La procedencia del banco es metadato. Una copia independiente no es un vínculo vivo ni
+  se consulta el estado actual del banco para recalcular resultados históricos.
+- Los intervalos `question_active` completados se unen antes de sumar para evitar doble
+  cómputo. Sólo si una pregunta no posee telemetría nueva se usa `MetricasNavegacion` como
+  fallback. Sin muestra, promedio, mediana y máximo son `null`; la cobertura indica qué
+  proporción de presentaciones posee tiempo.
+- Las opciones y distractores se leen de `IntentoPreguntaOpcionSnapshot`, no de la pregunta
+  actual. La justificación se contabiliza por separado y no modifica la métrica académica.
+
+No se etiqueta una diferencia entre variantes como estadísticamente significativa: se
+devuelve `diferenciaVariantesPuntosPorcentuales` y el tamaño de muestra para que producto
+defina posteriormente un criterio académico explícito.
+
+#### Response de preguntas y grupos
+
+```json
+{
+  "success": true,
+  "data": {
+    "criterios": {
+      "alcanceIntentos": "todos",
+      "estadoCorreccion": "todas",
+      "normalizacionPuntaje": "porcentaje_puntaje_maximo",
+      "identidadContenido": "contenidoHashSnapshot"
+    },
+    "kpis": {
+      "presentadas": 240,
+      "respondidas": 212,
+      "omitidas": 28,
+      "pendientesCorreccion": 14,
+      "correctas": 150,
+      "parciales": 30,
+      "incorrectas": 32,
+      "muestrasTiempo": 196,
+      "coberturaTemporal": 0.8167,
+      "tiempoPromedioMilisegundos": 32000,
+      "tiempoMaximoMilisegundos": 120000
+    },
+    "items": [],
+    "pagination": { "page": 1, "limit": 25, "total": 17, "totalPages": 1 }
+  }
+}
+```
+
+Cada item de preguntas incluye hash, IDs de origen actuales, enunciado/tipo/grupo del
+snapshot, conteos académicos, puntaje y porcentaje promedio, tasa de acierto, procedencia,
+justificaciones y tiempos promedio/mediana/máximo. Cada item de grupos agrega
+`cantidadVariantes`, `diferenciaVariantesPuntosPorcentuales` y `variantes` con su propio
+desglose. El endpoint de opciones devuelve texto/posición snapshot, `esCorrecta`,
+`esDistractor`, presentaciones, selecciones y porcentaje de selección.
+
+Una consulta sin resultados responde `200`, `items: []`, conteos en cero, métricas sin
+muestra en `null` y `pagination.total: 0`. Filtros inválidos producen
+`400 REQUEST_INVALID`; los errores internos usan `500 INTERNAL_ERROR` sin detalles SQL.
+
+La migración manual `migrations/20261017_indices_rendimiento_preguntas.sql` agrega sólo
+índices de soporte y no modifica datos, tablas funcionales ni Stored Procedures. Después
+de aplicarla ejecutar `scripts/verificar-indices-rendimiento-preguntas.sql` y revisar los
+planes con volumen representativo antes de aceptar índices adicionales.
+
+---
+
+### 4.17 Políticas, permisos y sesiones de revisión — etapa 5
+
+La corrección confirmada sigue siendo obligatoria, pero ya no habilita por sí sola el
+contenido. La disponibilidad se resuelve con esta precedencia:
+
+1. corrección no confirmada: denegada;
+2. permiso individual revocado: denegada;
+3. permiso individual activo y dentro de sus fechas: autorizada;
+4. sin permiso individual: se aplica la política general;
+5. la política general sólo alcanza al intento válido actual.
+
+Un permiso individual queda ligado al intento concreto y no migra si luego cambia el
+intento válido. Docentes y administradores mantienen acceso histórico por `/completo`.
+
+| Método | Endpoint | Roles |
+|---|---|---|
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/politica-revision` | `admin`, `docente` |
+| PUT | `/api/evaluaciones/publicaciones/:idPublicacion/politica-revision` | `admin`, `docente` |
+| PUT | `/api/intentos/:idIntento/permiso-revision` | `admin`, `docente` |
+| DELETE | `/api/intentos/:idIntento/permiso-revision` | `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/permisos-revision` | `admin`, `docente` |
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/auditoria-revision` | `admin`, `docente` |
+| GET | `/api/intentos/:idIntento/revision-disponible` | `admin`, `docente`, `alumno` titular |
+| POST | `/api/revisiones/intentos/:idIntento/sesiones` | `alumno` titular |
+| GET | `/api/revisiones/sesiones/:idSesion/contenido` | `alumno` titular |
+
+Modos generales: `nunca`, `al_corregir`, `ventana` y `manual`. El modo `manual` no
+autoriza por sí solo: requiere permiso individual. El acceso puede ser `unico` o
+`libre`. Una política `ventana` exige ambas fechas ISO 8601; los demás modos no las
+admiten. Las escrituras usan revisión optimista.
+
+```http
+PUT /api/evaluaciones/publicaciones/5/politica-revision
+Content-Type: application/json
+
+{
+  "Modo": "ventana",
+  "Acceso": "unico",
+  "VentanaDesde": "2026-10-20T12:00:00.000Z",
+  "VentanaHasta": "2026-10-22T12:00:00.000Z",
+  "RevisionEsperada": 1
+}
+```
+
+```http
+PUT /api/intentos/31/permiso-revision
+Content-Type: application/json
+
+{
+  "Acceso": "libre",
+  "FechaDesde": null,
+  "FechaHasta": "2026-10-25T23:59:59.000Z",
+  "Motivo": "Solicitud individual aprobada",
+  "RevisionEsperada": 0
+}
+```
+
+`DELETE /api/intentos/31/permiso-revision` crea o mantiene una revocación individual
+explícita, que prevalece sobre la política general e invalida sesiones emitidas. Repetir
+la revocación es idempotente. Los docentes sólo pueden operar publicaciones e intentos
+de sus comisiones activas; el administrador tiene alcance institucional.
+
+La disponibilidad no expone contenido:
+
+```json
+{
+  "success": true,
+  "data": {
+    "idIntento": 31,
+    "idPublicacion": 5,
+    "revisionDisponible": true,
+    "motivo": "POLICY_ALLOWED",
+    "acceso": "unico",
+    "origen": "general",
+    "modo": "ventana",
+    "revisionPolitica": 2,
+    "idPermiso": null,
+    "esIntentoValido": true
+  }
+}
+```
+
+La emisión requiere `Idempotency-Key` UUID. Una sesión nueva responde `201`; un replay
+o la reutilización concurrente de la misma sesión única activa responde `200`. La sesión
+expira cinco minutos después de emitirse y conserva snapshots de modo, acceso, revisión
+de política y permiso. Para abrir otra operación después de una expiración conocida, el
+cliente debe usar una clave de idempotencia nueva.
+
+```http
+POST /api/revisiones/intentos/31/sesiones
+Idempotency-Key: 74f530c8-b7e3-4287-a2c9-99cba672291f
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "idSesion": "fba031e9-8b40-41d0-aec3-bcd405ca29dd",
+    "idIntento": 31,
+    "acceso": "unico",
+    "fechaEmision": "2026-10-17T15:00:00.000Z",
+    "fechaExpiracion": "2026-10-17T15:05:00.000Z",
+    "reutilizada": false
+  }
+}
+```
+
+`GET /api/revisiones/sesiones/:idSesion/contenido` construye la devolución desde
+`IntentoPregunta` y `IntentoPreguntaOpcionSnapshot`, incluyendo selecciones y claves
+correctas sólo dentro de la sesión autorizada. En acceso `unico`, el primer consumo es
+atómico y el segundo devuelve `409 REVIEW_SESSION_CONSUMED`; en acceso `libre`, puede
+consultarse varias veces hasta expirar. Revocación, expiración, emisión, apertura y
+consumo quedan auditados.
+
+Errores estables principales: `REVIEW_NOT_AVAILABLE`, `REVIEW_SESSION_REQUIRED`,
+`REVIEW_SESSION_NOT_FOUND`, `REVIEW_SESSION_CONSUMED`, `REVIEW_SESSION_EXPIRED`,
+`REVIEW_SESSION_REVOKED`, `REVIEW_SCOPE_FORBIDDEN`,
+`REVIEW_POLICY_REVISION_CONFLICT` y `REVIEW_PERMISSION_REVISION_CONFLICT`.
+
+Requiere aplicar manualmente `migrations/20261018_revision_examen.sql`, idealmente dos
+veces en la base de prueba, y luego ejecutar `scripts/verificar-revision-examen.sql`.
+El backfill asigna `al_corregir + libre` a publicaciones existentes para conservar el
+comportamiento previo bajo una política explícita. No crea ni modifica Stored Procedures.
+
+---
+
 ## 5. Esquemas Zod — Detalle Completo
 
 ### 5.1 Tipos de Dato y Obligatoriedad
@@ -2201,6 +2547,24 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 | | `FechaInicioCliente` | timestamp ISO 8601 | Inicio sí; finalización posterior no |
 | | `FechaFinCliente` | timestamp ISO 8601 | No; debe acompañar duración |
 | | `DuracionMilisegundos` | entero seguro no negativo | No; debe acompañar fecha fin |
+| `EventoTemporalSchema` | `Tipo` | catálogo temporal v1 | Sí |
+| | `IdIntentoPregunta` | entero positivo | Sólo para `question_active`, donde es obligatorio |
+| | `SesionClienteId` | UUID | Sí |
+| | `SecuenciaCliente` | entero seguro no negativo | Sí |
+| | `FechaInicioCliente` | timestamp ISO 8601 | Inicio sí; cierre posterior no |
+| | `FechaFinCliente` | timestamp ISO 8601 | Sólo intervalos; debe acompañar duración |
+| | `DuracionMilisegundos` | entero seguro no negativo | Sólo intervalos; debe acompañar fecha fin |
+| | `Codigo` | `[A-Za-z0-9_.-]+`, máximo 50 | No |
+| | `VersionContrato` | literal `1` | No (default 1) |
+| `LoteEventosTemporalesSchema` | `Eventos` | array de 1 a 500 elementos | Sí |
+| `PoliticaRevisionSchema` | `Modo` | `nunca`, `al_corregir`, `ventana`, `manual` | Sí |
+| | `Acceso` | `unico`, `libre` | Sí |
+| | `VentanaDesde`, `VentanaHasta` | timestamp ISO 8601 nullable | Sólo para `ventana` |
+| | `RevisionEsperada` | entero no negativo | Sí |
+| `PermisoRevisionSchema` | `Acceso` | `unico`, `libre` | Sí |
+| | `FechaDesde`, `FechaHasta` | timestamp ISO 8601 nullable | No |
+| | `Motivo` | texto 1..250 nullable | No |
+| | `RevisionEsperada` | entero no negativo | Sí |
 | `CalificarSchema` | `notaFinal` | `z.number().min(0).max(10).multipleOf(0.01)` | Sí |
 | `CorregirRespuestaSchema` | `esCorrecta` | `z.boolean().nullable()` | No (puede ser null) |
 | | `comentariosDocente` | `z.string().nullable().optional()` | No |
@@ -2268,7 +2632,7 @@ Endpoint consolidado que devuelve el rendimiento académico de alumnos. Soporta 
 
 ```bash
 npm install         # Una sola vez
-npm test            # Suite completa (432 tests de referencia actual)
+npm test            # Suite completa; el conteo de referencia está en AGENTS.md
 npx jest --verbose  # Reporte detallado
 npx jest tests/auth.test.ts  # Archivo específico
 npx jest -t "carreras"       # Por patrón de nombre
@@ -2295,7 +2659,10 @@ tests/
 ├── rbac.test.ts            ← checkRole, JWT estricto/legacy, tipos y roles
 ├── reportes.test.ts        ← Rendimiento por alumno/evaluación + filtros + paginación global
 ├── reportes-calificacion.test.ts ← Escalas, umbrales, alcance válido y pendientes
-└── telemetria-focus.test.ts ← Incidentes idempotentes, duración, resumen, alcance y RBAC
+├── reportes-preguntas.test.ts ← Preguntas, grupos, variantes, opciones, tiempos y alcance
+├── revision-examen.test.ts  ← Políticas, permisos, sesiones, consumo y auditoría
+├── telemetria-focus.test.ts ← Contrato legacy de incidentes, duración, alcance y RBAC
+└── telemetria-temporal.test.ts ← Sesión/secuencia, lote, replay, orden, resumen y seguridad
 ```
 
 ### 6.3 Aislamiento
@@ -2654,7 +3021,7 @@ al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
 Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
 
 Validación local de esta entrega: `npm test -- --runInBand` y
-`npx jest --runInBand --detectOpenHandles`, ambos con 21 suites/432 pruebas. El puerto
+`npx jest --runInBand --detectOpenHandles`, ambos con 24 suites/479 pruebas. El puerto
 55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
 global preexistente (`rootDir` sin `include`, y después la incompatibilidad
 NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server

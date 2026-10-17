@@ -181,7 +181,82 @@ registrar un incidente por sí solo continúa sin modificar el intento. La etapa
 generalizará eventos y tiempos; la etapa 5 reemplazará la habilitación directa por una
 política y sesiones de revisión.
 
-**Siguiente trabajo funcional:** etapa 3, telemetría temporal confiable.
+## Evolución — etapa 3: telemetría temporal confiable
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE SQL REAL E INTEGRACIÓN FRONTEND**
+
+- [x] Extender `IncidenteIntento` sin romper las filas ni endpoints legacy.
+- [x] Agregar catálogo de eventos y unicidad por intento, sesión y secuencia.
+- [x] Incorporar escritura individual idempotente y cierre posterior de intervalos.
+- [x] Incorporar lote de hasta 500 eventos con resultado y transacción por elemento.
+- [x] Agregar listado paginado, resumen, unión de solapamientos y fallback legacy.
+- [x] Exponer `idIntentoPregunta` junto con `idPregunta` en el render del examen.
+- [x] Validar reloj, duración, orden temporal, ventana de siete días y pertenencia.
+- [x] Mantener los eventos sin efectos sobre nota, estado o intento válido.
+- [x] Agregar migración idempotente, verificador de sólo lectura y tests focalizados.
+- [ ] Aplicar dos veces `20261016_telemetria_temporal.sql` en SQL Server de prueba y
+  ejecutar `verificar-telemetria-temporal.sql`.
+- [ ] Probar replays y UUID/secuencia concurrentes contra las constraints reales.
+- [ ] Contrastar en SQL real la unión de intervalos solapados y el fallback por pregunta.
+- [ ] Integrar la cola offline del frontend y probar recuperación posterior al cierre.
+
+Los endpoints legacy mantienen `200`, listado completo y ventana de siete días. El
+nuevo `GET /eventos` limita cada página a 100. El lote no usa una transacción global:
+un elemento rechazado o en conflicto no revierte los elementos válidos.
+
+## Evolución — etapa 4: rendimiento por pregunta y grupo
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE ÍNDICES, PLANES E INTEGRACIÓN FRONTEND**
+
+- [x] Agregar reportes paginados de preguntas, grupos/variantes y distribución de opciones.
+- [x] Aplicar filtros por estructura académica, fechas, estado, corrección y alcance
+  `todos|validos`, con RBAC docente por comisión y administrador institucional.
+- [x] Calcular KPIs sobre todo el conjunto filtrado antes de paginar, con orden estable.
+- [x] Normalizar puntajes como porcentaje del máximo snapshot para combinar escalas 10/100.
+- [x] Conservar identidad histórica por `ContenidoHashSnapshot` y tratar el banco sólo
+  como procedencia de una copia independiente.
+- [x] Unir intervalos `question_active` superpuestos, devolver tiempos ausentes como null
+  y usar navegación legacy sólo como fallback por pregunta.
+- [x] Calcular opciones/distractores desde snapshots y adjuntar variantes por grupo sin N+1.
+- [x] Agregar tests focalizados, documentación, migración de índices y verificador de lectura.
+- [x] Ejecutar las consultas de preguntas, grupos, opciones y medianas en SQL Server real
+  con los datos disponibles, sin aplicar escrituras.
+- [ ] Aplicar dos veces `20261017_indices_rendimiento_preguntas.sql` y ejecutar
+  `verificar-indices-rendimiento-preguntas.sql`.
+- [ ] Comparar planes antes/después con volumen representativo. La base de prueba actual
+  es pequeña y no permite concluir selectividad o costo productivo de los índices.
+- [ ] Integrar y comprobar manualmente dashboards de preguntas, variantes, grupos y opciones.
+
+No se aplica una etiqueta de “diferencia significativa” entre variantes hasta acordar un
+umbral o método estadístico. El contrato expone diferencia porcentual y tamaño de muestra.
+
+## Evolución — etapa 5: políticas y sesiones de revisión
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE MIGRACIÓN, SQL REAL E INTEGRACIÓN FRONTEND**
+
+- [x] Agregar políticas por publicación: `nunca`, `al_corregir`, `ventana` y `manual`.
+- [x] Agregar acceso `unico|libre`, revisión optimista y auditoría de cambios.
+- [x] Incorporar permisos individuales activos/revocados ligados al intento concreto.
+- [x] Aplicar precedencia de corrección, revocación, permiso y política sobre intento válido.
+- [x] Emitir sesiones de cinco minutos con `Idempotency-Key` y snapshot de autorización.
+- [x] Garantizar una sola sesión única activa y consumo atómico con conflicto en el replay.
+- [x] Construir el contenido del alumno desde snapshots, sin reutilizar `/completo`.
+- [x] Reservar `/completo` para docentes/administradores y exigir sesión al alumno.
+- [x] Propagar la política efectiva a `revisionDisponible` en historiales compatibles.
+- [x] Crear migración idempotente, backfill compatible y verificador de sólo lectura.
+- [x] Agregar pruebas focalizadas de modos, ventanas, permisos, revocación, intento válido,
+  sesiones, expiración, consumo, RBAC y auditoría.
+- [ ] Aplicar dos veces `20261018_revision_examen.sql` en SQL Server de prueba y ejecutar
+  `verificar-revision-examen.sql`.
+- [ ] Probar emisión/consumo y revocación concurrentes contra SQL Server real.
+- [ ] Integrar en frontend configuración docente, permisos y revisión por sesión.
+
+El despliegue de backend requiere aplicar primero la migración: la creación de nuevas
+publicaciones ya inserta la política default en la misma transacción. No se modificaron
+Stored Procedures ni datos académicos históricos.
+
+**Siguiente trabajo funcional:** etapa 6, políticas configurables de pantalla completa
+e incidentes.
 
 ---
 
@@ -523,7 +598,7 @@ evaluaciones, además del detalle por publicación. No implementado en esta entr
 
 ### Evidencia de validación local
 
-- Suite completa actual: **21 suites / 432 pruebas aprobadas**, también con
+- Suite completa actual: **24 suites / 479 pruebas aprobadas**, también con
   `--runInBand --detectOpenHandles`. Jest finaliza naturalmente sin `--forceExit`.
 - Suite del banco: **66 pruebas aprobadas**; incluye integración HTTP de copias
   durante creación/edición, rollback, conflictos y aislamiento.

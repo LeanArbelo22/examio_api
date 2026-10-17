@@ -156,6 +156,9 @@ describe('GET /api/intentos/mios', () => {
     expect(res.status).toBe(200);
     const sqlText = dbRequest.query.mock.calls[0][0];
     expect(sqlText).toContain('LEFT JOIN dbo.IntentoValidoOverride');
+    expect(sqlText).toContain('LEFT JOIN dbo.PoliticaRevisionPublicacion');
+    expect(sqlText).toContain('LEFT JOIN dbo.PermisoRevisionIntento');
+    expect(sqlText).toContain("ISNULL(B.EstadoPermisoRevision,'')<>'revocado'");
     expect(sqlText).toContain("CASE WHEN I.Estado='entregado' THEN I.FechaFin END DESC");
     expect(sqlText).toContain("WHEN B.IdIntentoOverride=B.IdIntento THEN 'manual'");
     expect(sqlText.indexOf('INTO #IntentosBase')).toBeLessThan(sqlText.indexOf('B.Estado=@Estado'));

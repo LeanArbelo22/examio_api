@@ -18,6 +18,12 @@ import { checkRole, validateRequest } from '../middlewares/auth.middleware';
 import { ActividadSchema, ActividadUpdateSchema, PublicarActividadSchema, SeleccionarIntentoValidoSchema } from '../schemas/evaluacion.schema';
 import { ImportarBancoSchema } from '../schemas/banco.schema';
 import { importarBanco } from '../controllers/banco.controller';
+import {
+  getAuditoriaRevision,
+  getPermisosRevision,
+  getPoliticaRevision,
+  putPoliticaRevision,
+} from '../controllers/revision.controller';
 
 const router = Router();
 router.post('/:id/importar-banco', checkRole(['docente']), validateRequest(ImportarBancoSchema), importarBanco);
@@ -33,6 +39,10 @@ router.get('/pendientes/:matricula', checkRole(['alumno', 'admin', 'docente']), 
 router.get('/publicaciones/:idPublicacion/alumnos/:matricula/intentos', checkRole(['alumno', 'admin', 'docente']), listarIntentosAlumnoPublicacion);
 router.put('/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido', checkRole(['admin', 'docente']), validateRequest(SeleccionarIntentoValidoSchema), seleccionarIntentoValidoAlumno);
 router.delete('/publicaciones/:idPublicacion/alumnos/:matricula/intento-valido', checkRole(['admin', 'docente']), eliminarIntentoValidoAlumno);
+router.get('/publicaciones/:idPublicacion/politica-revision', checkRole(['admin', 'docente']), getPoliticaRevision);
+router.put('/publicaciones/:idPublicacion/politica-revision', checkRole(['admin', 'docente']), putPoliticaRevision);
+router.get('/publicaciones/:idPublicacion/permisos-revision', checkRole(['admin', 'docente']), getPermisosRevision);
+router.get('/publicaciones/:idPublicacion/auditoria-revision', checkRole(['admin', 'docente']), getAuditoriaRevision);
 router.get('/:id/detalle', checkRole(['admin', 'docente']), getDetallePublicacion);
 router.get('/:id/alumnos', checkRole(['admin', 'docente']), getAlumnosByPublicacion);
 

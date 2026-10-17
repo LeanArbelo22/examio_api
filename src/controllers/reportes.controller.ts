@@ -2,11 +2,110 @@ import { Request, Response } from 'express';
 import { pool } from '../config/db';
 import * as sql from 'mssql';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
-import { RendimientoEvaluacionesQuerySchema } from '../schemas/reportes.schema';
+import {
+  IdPreguntaReporteSchema,
+  RendimientoEvaluacionesQuerySchema,
+  RendimientoGruposQuerySchema,
+  RendimientoOpcionesQuerySchema,
+  RendimientoPreguntasQuerySchema,
+} from '../schemas/reportes.schema';
 import {
   getRendimientoEvaluacionesReport,
   isEvaluationReportScopeAllowed,
 } from '../services/reportes-evaluaciones.service';
+import {
+  getRendimientoGruposReport,
+  getRendimientoOpcionesReport,
+  getRendimientoPreguntasReport,
+  isQuestionReportScopeAllowed,
+} from '../services/reportes-preguntas.service';
+
+const reportScopeError = (res: Response) => res.status(403).json({
+  success: false,
+  message: 'Los filtros solicitados están fuera de su alcance',
+  code: 'REPORT_SCOPE_FORBIDDEN',
+});
+
+const reportValidationError = (res: Response, issues: unknown) => res.status(400).json({
+  success: false,
+  message: 'Filtros inválidos',
+  code: 'REQUEST_INVALID',
+  errors: issues,
+});
+
+const getReportTeacherId = (req: Request): number | null | undefined => {
+  const user = (req as any).user;
+  if (user.role !== 'docente') return null;
+  const idDocente = Number(user.idDocente);
+  return Number.isInteger(idDocente) && idDocente > 0 ? idDocente : undefined;
+};
+
+export const getRendimientoPreguntas = async (req: Request, res: Response) => {
+  const parsed = RendimientoPreguntasQuerySchema.safeParse(req.query);
+  if (!parsed.success) return reportValidationError(res, parsed.error.issues);
+  try {
+    const idDocente = getReportTeacherId(req);
+    if (idDocente === undefined) return reportScopeError(res);
+    if (idDocente !== null && !await isQuestionReportScopeAllowed(idDocente, parsed.data)) {
+      return reportScopeError(res);
+    }
+    const data = await getRendimientoPreguntasReport(parsed.data, idDocente);
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: 'No se pudo obtener el rendimiento por pregunta',
+      code: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+export const getRendimientoGrupos = async (req: Request, res: Response) => {
+  const parsed = RendimientoGruposQuerySchema.safeParse(req.query);
+  if (!parsed.success) return reportValidationError(res, parsed.error.issues);
+  try {
+    const idDocente = getReportTeacherId(req);
+    if (idDocente === undefined) return reportScopeError(res);
+    if (idDocente !== null && !await isQuestionReportScopeAllowed(idDocente, parsed.data)) {
+      return reportScopeError(res);
+    }
+    const data = await getRendimientoGruposReport(parsed.data, idDocente);
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: 'No se pudo obtener el rendimiento por grupo',
+      code: 'INTERNAL_ERROR',
+    });
+  }
+};
+
+export const getRendimientoOpciones = async (req: Request, res: Response) => {
+  const parsedId = IdPreguntaReporteSchema.safeParse(req.params.idPregunta);
+  const parsed = RendimientoOpcionesQuerySchema.safeParse(req.query);
+  if (!parsedId.success || !parsed.success) {
+    return reportValidationError(res, [
+      ...(parsedId.success ? [] : parsedId.error.issues),
+      ...(parsed.success ? [] : parsed.error.issues),
+    ]);
+  }
+  try {
+    const idDocente = getReportTeacherId(req);
+    if (idDocente === undefined) return reportScopeError(res);
+    if (idDocente !== null
+        && !await isQuestionReportScopeAllowed(idDocente, parsed.data, parsedId.data)) {
+      return reportScopeError(res);
+    }
+    const data = await getRendimientoOpcionesReport(parsedId.data, parsed.data, idDocente);
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: 'No se pudo obtener el rendimiento de opciones',
+      code: 'INTERNAL_ERROR',
+    });
+  }
+};
 
 const INTENTO_VALIDO_APPLY = `
   LEFT JOIN IntentoValidoOverride IVO

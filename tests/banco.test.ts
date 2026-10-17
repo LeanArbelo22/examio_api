@@ -85,7 +85,7 @@ beforeEach(() => {
       return result();
     }
     if (sql.startsWith('INSERT INTO dbo.Actividad')) return result([{ Id: 5, Revision: 1 }]);
-    if (sql.startsWith('INSERT INTO dbo.Publicacion')) return result([{ Id: 2 }]);
+    if (sql.includes('INSERT INTO dbo.Publicacion')) return result([{ Id: 2 }]);
     if (sql.startsWith('UPDATE dbo.Actividad SET Revision=Revision+1')) return result([{ Revision: 2 }]);
     if (sql.startsWith('INSERT INTO dbo.BancoPregunta')) {
       pregunta = { Id: 10, IdDocente: p.Docente, Titulo: p.Titulo, Tipo: p.Tipo, Enunciado: p.Enunciado,

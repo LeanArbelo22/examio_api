@@ -525,8 +525,8 @@ describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
     });
     (reqBuilder.execute as jest.Mock).mockResolvedValueOnce({
       recordset: [
-        { IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL Básico' },
-        { IdPregunta: 20, Enunciado: '¿Normalización 3FN?', Tipo: 'vf', GrupoConceptualmente: 'Diseño BD' },
+        { IdIntentoPregunta: 83, IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc', GrupoConceptualmente: 'SQL Básico' },
+        { IdIntentoPregunta: 84, IdPregunta: 20, Enunciado: '¿Normalización 3FN?', Tipo: 'vf', GrupoConceptualmente: 'Diseño BD' },
       ],
     });
 
@@ -538,12 +538,14 @@ describe('GET /api/evaluaciones/intento/:idIntento/renderizar', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveLength(2);
     expect(res.body.data[0]).toEqual({
+      idIntentoPregunta: 83,
       idPregunta: 10,
       enunciado: '¿Qué es SQL?',
       tipo: 'mc',
       grupoConceptualmente: 'SQL Básico',
       respuesta: null,
     });
+    expect(res.body.data[1].idIntentoPregunta).toBe(84);
     expect(res.body.data[1].idPregunta).toBe(20);
   });
 

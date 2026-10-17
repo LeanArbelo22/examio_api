@@ -17,6 +17,25 @@ const idPositivo = (value: string, nombre: string): number => {
   return parsed;
 };
 
+const revisionDisponibleSql = `CAST(CASE
+  WHEN I.Estado='entregado'
+   AND I.CorreccionConfirmada=1
+   AND ISNULL(PER.Estado,'')<>'revocado'
+   AND (
+     (PER.Estado='activo'
+       AND (PER.FechaDesde IS NULL OR PER.FechaDesde<=SYSUTCDATETIME())
+       AND (PER.FechaHasta IS NULL OR PER.FechaHasta>=SYSUTCDATETIME()))
+     OR
+     (COALESCE(IVO.IdIntento,IA.IdIntento)=I.Id
+       AND (
+         COALESCE(PREV.Modo,'al_corregir')='al_corregir'
+         OR (PREV.Modo='ventana'
+           AND PREV.VentanaDesde<=SYSUTCDATETIME()
+           AND PREV.VentanaHasta>=SYSUTCDATETIME())
+       ))
+   )
+  THEN 1 ELSE 0 END AS bit)`;
+
 export const iniciarExamen = async (req: Request, res: Response) => {
   try {
     const { IdPublicacion, IdAlumno } = req.body;
@@ -133,8 +152,7 @@ export const getIntentosDetallados = async (req: Request, res: Response) => {
                I.NotaFinal, I.NotaAutomatica, I.FechaInicio, I.FechaFin,
                I.CorreccionConfirmada,
                CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
-               CAST(CASE WHEN I.Estado='entregado' AND I.CorreccionConfirmada=1
-                    THEN 1 ELSE 0 END AS bit) AS RevisionDisponible,
+               ${revisionDisponibleSql} AS RevisionDisponible,
                I.NumeroIntento,
                A.Titulo AS TituloEvaluacion, A.Tipo AS TipoEvaluacion,
                A.DuracionMinutos,
@@ -145,6 +163,17 @@ export const getIntentosDetallados = async (req: Request, res: Response) => {
         INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
         INNER JOIN Materia M ON MD.IdMateria = M.Id
         INNER JOIN Division DV ON MD.IdDivision = DV.Id
+        LEFT JOIN PoliticaRevisionPublicacion PREV ON PREV.IdPublicacion=I.IdPublicacion
+        LEFT JOIN PermisoRevisionIntento PER ON PER.IdIntento=I.Id
+        LEFT JOIN IntentoValidoOverride IVO
+          ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
+        OUTER APPLY (
+          SELECT TOP (1) IV.Id AS IdIntento
+          FROM Intento IV
+          WHERE IV.IdPublicacion=I.IdPublicacion AND IV.IdAlumno=I.IdAlumno
+            AND IV.Estado='entregado'
+          ORDER BY IV.FechaFin DESC,IV.NumeroIntento DESC,IV.Id DESC
+        ) IA
         WHERE I.IdAlumno = @IdAlumno
         ORDER BY I.FechaInicio DESC
       `);
@@ -169,14 +198,24 @@ export const getHistorialCorregido = async (req: Request, res: Response) => {
                I.NotaFinal,
                I.NumeroIntento,I.CorreccionConfirmada,
                CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
-               CAST(CASE WHEN I.Estado='entregado' AND I.CorreccionConfirmada=1
-                    THEN 1 ELSE 0 END AS bit) AS RevisionDisponible
+               ${revisionDisponibleSql} AS RevisionDisponible
         FROM Intento I
         INNER JOIN Publicacion P ON I.IdPublicacion = P.Id
         INNER JOIN Actividad A ON P.IdActividad = A.Id
         INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
         INNER JOIN Materia M ON MD.IdMateria = M.Id
         INNER JOIN Division DV ON MD.IdDivision = DV.Id
+        LEFT JOIN PoliticaRevisionPublicacion PREV ON PREV.IdPublicacion=I.IdPublicacion
+        LEFT JOIN PermisoRevisionIntento PER ON PER.IdIntento=I.Id
+        LEFT JOIN IntentoValidoOverride IVO
+          ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
+        OUTER APPLY (
+          SELECT TOP (1) IV.Id AS IdIntento
+          FROM Intento IV
+          WHERE IV.IdPublicacion=I.IdPublicacion AND IV.IdAlumno=I.IdAlumno
+            AND IV.Estado='entregado'
+          ORDER BY IV.FechaFin DESC,IV.NumeroIntento DESC,IV.Id DESC
+        ) IA
         WHERE I.IdAlumno = @IdAlumno
           AND I.NotaFinal IS NOT NULL
           AND I.Estado = 'entregado'
@@ -238,14 +277,14 @@ export const getIntentoCompleto = async (req: Request, res: Response) => {
       });
     }
 
-    const revisionDisponible = intento.Estado === 'entregado' && Boolean(intento.CorreccionConfirmada);
-    if (actor.role === 'alumno' && !revisionDisponible) {
+    if (actor.role === 'alumno') {
       return res.status(409).json({
         success: false,
-        message: 'La revisión del intento todavía no está disponible',
-        code: 'REVIEW_NOT_AVAILABLE',
+        message: 'La revisión del alumno requiere una sesión autorizada',
+        code: 'REVIEW_SESSION_REQUIRED',
       });
     }
+    const revisionDisponible = intento.Estado === 'entregado' && Boolean(intento.CorreccionConfirmada);
 
     const preguntasResult = await pool.request()
       .input('IdIntento', sql.Int, idIntento)

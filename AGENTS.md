@@ -94,10 +94,11 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Comisiones | MateriaDivision y alumnos | archivos `comisiones.*` | `MateriaDivision` es una relación central |
 | Evaluaciones | Actividades, borradores, publicación, grupos, preguntas y variantes | archivos `evaluaciones.*`, services `evaluacion-*` | Revisión optimista; publicación y guardado en banco transaccionales |
 | Intentos | Inicio, respuestas, entrega, corrección e historial propio filtrable | archivos `intentos.*`, services `intento-*` | Flujo crítico y dependiente de SPs |
+| Revisión | Políticas, permisos, sesiones breves y contenido autorizado | archivos `revision.*`, `revision-examen.service.ts` | Corrección confirmada es precondición; contenido alumno sólo por sesión |
 | Actas | Cabecera, detalles y cierre | archivos `actas.*` | Operaciones transaccionales y estados |
-| Telemetría | Navegación, alertas legacy e incidentes de foco con duración | archivos `telemetria.*`, `telemetria-focus.service.ts` | UUID idempotente; registra auditoría sin anulación automática |
+| Telemetría | Navegación, eventos temporales e incidentes con duración | archivos `telemetria.*`, services `telemetria-*` | UUID + sesión/secuencia idempotentes; lote offline; sin consecuencias automáticas |
 | Usuarios | Cuentas, hashes, roles y activación | archivos `usuarios.*` | Integridad cruzada con Alumno/Docente |
-| Reportes | Rendimiento por alumno y por publicación de evaluación | archivos `reportes.*` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
+| Reportes | Rendimiento por alumno, evaluación, pregunta, variante, grupo y opción | archivos `reportes.*`, `reportes-preguntas.service.ts` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
 
 El catálogo completo y actualizado de endpoints está en `README.md`.
 
@@ -182,7 +183,7 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 21 suites y 432 tests pasan, también con
+Estado de referencia reciente: 24 suites y 479 tests pasan, también con
 `--runInBand --detectOpenHandles`.
 Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
 revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
@@ -235,6 +236,19 @@ Convenciones:
   `20261015_anulacion_confirmacion_revision.sql`: agrega anulación por incidente,
   confirmación auditada de corrección y el bloqueo de revisión del alumno. No asumirla
   aplicada fuera de la base donde se verifique dos veces junto con su script de lectura.
+- La etapa 3 de telemetría temporal requiere aplicar manualmente, después de la anterior,
+  `20261016_telemetria_temporal.sql` y ejecutar su verificador. Reutiliza
+  `IncidenteIntento`, agrega catálogo, pregunta/sesión/secuencia, escritura individual y
+  por lote, listado paginado y unión de intervalos. No asumirla aplicada en otros ambientes.
+- La etapa 4 de rendimiento por pregunta/grupo está implementada sin tablas agregadas ni
+  SP nuevos. Requiere aplicar manualmente `20261017_indices_rendimiento_preguntas.sql` y
+  revisar su verificador/planes con volumen representativo. Los endpoints agrupan por hash
+  snapshot, normalizan puntaje por máximo y calculan tiempos por unión de intervalos.
+- La etapa 5 de revisión está implementada y requiere aplicar manualmente
+  `20261018_revision_examen.sql` y su verificador antes de desplegar el backend. Agrega
+  políticas por publicación, permisos por intento, sesiones UUID de cinco minutos y
+  auditoría. El backfill compatible es `al_corregir + libre`; `/completo` ya no entrega
+  contenido a alumnos, que deben consumirlo mediante una sesión autorizada.
 - Etapas 1 a 6 de calificación implementadas: configuración 10/100, puntaje por grupo,
   corrección por puntaje sobre `IntentoPregunta`, recálculo, override final auditado y
   selección automática/manual del intento válido, más historial propio filtrable basado
@@ -305,10 +319,19 @@ Convenciones:
   llegar separados; no sobrescribir un evento completado ni agregar consecuencias
   automáticas. La sincronización nueva vence siete días después del fin del intento,
   pero un replay idéntico ya persistido debe seguir siendo válido.
+- En telemetría temporal, `(IdIntento,SesionClienteId,SecuenciaCliente)` es una segunda
+  identidad única. El lote procesa cada elemento por separado; los intervalos abiertos no
+  suman y los solapados deben unirse. `MetricasNavegacion` sólo es fallback por pregunta
+  cuando no existe `question_active` nuevo. Este evento usa `idIntentoPregunta` entregado
+  por el render, nunca `idPregunta`. Los endpoints legacy no se paginan.
 - Registrar un incidente no anula el intento. La consecuencia sólo se aplica mediante
   `PUT /intentos/:idIntento/anular-por-incidente/:eventoId`, que conserva respuestas,
-  exige estado en progreso y audita una única anulación. Hasta la etapa 5, la revisión
-  del alumno exige intento entregado y corrección confirmada.
+  exige estado en progreso y audita una única anulación.
+- La revisión del alumno exige corrección confirmada y autorización efectiva. Una
+  revocación individual prevalece; un permiso activo autoriza ese intento; la política
+  general sólo alcanza al intento válido actual. Las sesiones congelan la autorización,
+  vencen en cinco minutos y, en acceso `unico`, sólo admiten un consumo atómico. No
+  volver a exponer claves por `/intentos/:id/completo` para alumnos.
 - Las transacciones de evaluaciones y actas deben hacer rollback ante cualquier
   fallo.
 - Estados incompletos: vencimiento automático, anulación manual, firma de acta y
@@ -328,6 +351,10 @@ Convenciones:
 - Los reportes consumen la selección canónica sólo cuando
   `alcanceIntentos=validos`; `todos` es el default compatible. KPIs y gráficos deben
   calcularse antes de paginar y desde el mismo alcance SQL autorizado.
+- Rendimiento por pregunta usa `ContenidoHashSnapshot`; no agrupar por texto ni tratar la
+  procedencia del banco como vínculo vivo. Opciones/distractores salen del snapshot. Los
+  tiempos ausentes son null, y `MetricasNavegacion` sólo reemplaza una pregunta sin
+  `question_active`. No declarar diferencias “significativas” sin criterio aprobado.
 - `InscripcionMateria` no tiene fecha de alta: “alumnos alcanzados” por una
   publicación representa el padrón actual de la comisión, no un padrón histórico.
 - La aprobación en reportes usa `Actividad.NotaAprobacion`; no reintroducir constantes

@@ -6,6 +6,9 @@ import {
   registrarIncidenteFoco,
   getResumenIncidentes,
   getIncidentesByIntento,
+  registrarEventoTemporal,
+  registrarEventosTemporalesLote,
+  getEventosTemporales,
 } from '../controllers/telemetria.controller';
 import { checkRole, validateRequest } from '../middlewares/auth.middleware';
 import { AlertaSchema, IncidenteFocoSchema, NavegacionSchema } from '../schemas/telemetria.schema';
@@ -23,5 +26,8 @@ router.put(
 );
 router.get('/intentos/:idIntento/resumen', checkRole(['docente', 'admin']), getResumenIncidentes);
 router.get('/intentos/:idIntento/incidentes', checkRole(['docente', 'admin']), getIncidentesByIntento);
+router.put('/intentos/:idIntento/eventos/:eventoId', checkRole(['alumno', 'admin']), registrarEventoTemporal);
+router.post('/intentos/:idIntento/eventos/lote', checkRole(['alumno', 'admin']), registrarEventosTemporalesLote);
+router.get('/intentos/:idIntento/eventos', checkRole(['docente', 'admin']), getEventosTemporales);
 
 export default router;

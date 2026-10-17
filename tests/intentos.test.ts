@@ -521,43 +521,28 @@ describe('GET /api/intentos/:idIntento/completo', () => {
     expect(res.body.message).toBe('Acceso denegado. No tienes permisos para ver la radiografía de este intento.');
   });
 
-  it('retorna 200 cuando alumno ve su propio intento (id coincide)', async () => {
+  it('exige una sesión de revisión cuando el alumno consulta su propio intento', async () => {
     const reqBuilder = mock.pool.request();
-    (reqBuilder.query as jest.Mock)
-      .mockResolvedValueOnce({
-        recordset: [
-          {
-            IdIntento: 1, IdAlumno: 2, IdPublicacion: 5, Estado: 'entregado',
-            CorreccionConfirmada: true,
-            NotaFinal: null, NotaAutomatica: 8.00,
-            FechaInicio: new Date('2026-06-15T10:00:00Z'),
-            FechaFin: new Date('2026-06-15T11:30:00Z'),
-            NumeroIntento: 1,
-            Nombre: 'Julieta', Apellido: 'Acosta', Correo: 'jacosta@test.com',
-            TituloEvaluacion: 'Parcial I', TipoEvaluacion: 'evaluacion', DuracionMinutos: 120,
-          },
-        ],
-      })
-      .mockResolvedValueOnce({
-        recordset: [{
-          IdPregunta: 10, Enunciado: '¿Qué es SQL?', Tipo: 'mc',
-          PuntajeMaximoSnapshot: 2, PuntajeObtenido: 2,
-          IdOpcion: 1, OpcionTexto: 'Lenguaje de consulta', EsCorrecta: true,
-          FueSeleccionada: 1, IdRespuesta: 1, RtaTexto: null,
-        }],
-      });
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{
+        IdIntento: 1, IdAlumno: 2, IdPublicacion: 5, Estado: 'entregado',
+        CorreccionConfirmada: true,
+        NotaFinal: null, NotaAutomatica: 8.00,
+        FechaInicio: new Date('2026-06-15T10:00:00Z'),
+        FechaFin: new Date('2026-06-15T11:30:00Z'),
+        NumeroIntento: 1,
+        Nombre: 'Julieta', Apellido: 'Acosta', Correo: 'jacosta@test.com',
+        TituloEvaluacion: 'Parcial I', TipoEvaluacion: 'evaluacion', DuracionMinutos: 120,
+      }],
+    });
 
     const res = await request(app)
       .get('/api/intentos/1/completo')
       .set('Authorization', `Bearer ${alumnoToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data).toMatchObject({ correccionConfirmada: true, correccionPendiente: false, revisionDisponible: true });
-    expect(res.body.data.preguntas[0].opciones[0]).toMatchObject({
-      esCorrecta: true,
-      fueSeleccionada: true,
-    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('REVIEW_SESSION_REQUIRED');
+    expect(reqBuilder.query).toHaveBeenCalledTimes(1);
   });
 
   it('no expone el contenido al alumno antes de confirmar la corrección', async () => {
@@ -574,7 +559,7 @@ describe('GET /api/intentos/:idIntento/completo', () => {
       .set('Authorization', `Bearer ${alumnoToken}`);
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('REVIEW_NOT_AVAILABLE');
+    expect(res.body.code).toBe('REVIEW_SESSION_REQUIRED');
     expect(reqBuilder.query).toHaveBeenCalledTimes(1);
   });
 });
@@ -667,7 +652,13 @@ describe('PUT /api/intentos/:idIntento/confirmar-correccion', () => {
       .mockResolvedValueOnce({ recordset: [{
         IdIntento: 1, CorreccionPendiente: false, CorreccionConfirmada: true,
         CorreccionConfirmadaPor: 1, OrigenConfirmacionCorreccion: 'manual',
-        RevisionDisponible: true, Replay: false,
+        Replay: false,
+      }] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdIntento: 1, IdAlumno: 2, IdPublicacion: 5, EstadoIntento: 'entregado',
+        CorreccionConfirmada: true, IdIntentoValido: 1, Modo: 'al_corregir',
+        AccesoPolitica: 'libre', RevisionPolitica: 1, EstadoPermiso: null,
+        FechaServidor: new Date(),
       }] });
 
     const res = await request(app)
@@ -683,17 +674,24 @@ describe('PUT /api/intentos/:idIntento/confirmar-correccion', () => {
   });
 
   it('es idempotente cuando la corrección ya estaba confirmada', async () => {
-    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [scope({
-      CorreccionConfirmada: true, CorreccionConfirmadaPor: 1,
-      FechaCorreccionConfirmada: new Date(), OrigenConfirmacionCorreccion: 'manual',
-    })] });
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope({
+        CorreccionConfirmada: true, CorreccionConfirmadaPor: 1,
+        FechaCorreccionConfirmada: new Date(), OrigenConfirmacionCorreccion: 'manual',
+      })] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdIntento: 1, IdAlumno: 2, IdPublicacion: 5, EstadoIntento: 'entregado',
+        CorreccionConfirmada: true, IdIntentoValido: 1, Modo: 'al_corregir',
+        AccesoPolitica: 'libre', RevisionPolitica: 1, EstadoPermiso: null,
+        FechaServidor: new Date(),
+      }] });
     const res = await request(app)
       .put('/api/intentos/1/confirmar-correccion')
       .set('Authorization', `Bearer ${docenteToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ correccionConfirmada: true, replay: true });
-    expect(mock.transactionRequest.query).toHaveBeenCalledTimes(1);
+    expect(mock.transactionRequest.query).toHaveBeenCalledTimes(2);
   });
 
   it('rechaza confirmar mientras exista una pregunta sin puntaje definitivo', async () => {

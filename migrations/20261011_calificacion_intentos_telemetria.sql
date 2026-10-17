@@ -254,7 +254,7 @@ BEGIN TRY
       FROM dbo.GrupoPregunta GP
       JOIN dbo.Actividad A ON A.Id = GP.IdActividad
     )
-    SELECT P.Id AS IdPregunta, P.Enunciado, P.Tipo,
+    SELECT IP.Id AS IdIntentoPregunta,P.Id AS IdPregunta,P.Enunciado,P.Tipo,
       GP.TituloReferencia AS GrupoConceptualmente,
       CAST(COALESCE(IP.PuntajeMaximoSnapshot, GP.PuntajeMaximo,
         ((A.EscalaCalificacion * 100 / G.TotalGrupos) +

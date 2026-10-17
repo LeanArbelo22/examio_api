@@ -258,9 +258,21 @@ export async function crearEvaluacion(db: DbBanco, actor: ActorBanco, input: Act
     Escala: configuracion.EscalaCalificacion, Aprobacion: puntajeSql(configuracion.NotaAprobacion),
     Modo: configuracion.ModoPuntaje, MostrarPuntaje: configuracion.MostrarPuntajePorPregunta,
     CorreccionAutomatica: configuracion.CorreccionAutomaticaCerradas })).recordset[0];
-  const publicacion = (await consultar(db, `INSERT INTO dbo.Publicacion(IdActividad,IdMateriaDivision,FechaInicio,FechaFin,Visible)
-    OUTPUT inserted.Id VALUES(@Actividad,@Comision,CAST(@Inicio AS datetime),CAST(@Fin AS datetime),1)`,
-  { Actividad: actividad.Id, Comision: input.IdMateriaDivision, Inicio: input.FechaInicio, Fin: input.FechaFin })).recordset[0];
+  const publicacion = (await consultar(db, `DECLARE @NuevaPublicacion TABLE (Id INT NOT NULL);
+    INSERT INTO dbo.Publicacion(IdActividad,IdMateriaDivision,FechaInicio,FechaFin,Visible)
+      OUTPUT inserted.Id INTO @NuevaPublicacion
+      VALUES(@Actividad,@Comision,CAST(@Inicio AS datetime),CAST(@Fin AS datetime),1);
+    INSERT INTO dbo.PoliticaRevisionPublicacion
+      (IdPublicacion,Modo,Acceso,Revision,ModificadoPor)
+      SELECT Id,'al_corregir','libre',1,@Usuario FROM @NuevaPublicacion;
+    INSERT INTO dbo.AuditoriaRevisionIntento
+      (IdPublicacion,IdUsuario,ActorRol,Accion,Detalle)
+      SELECT Id,@Usuario,@Rol,'politica_actualizada',
+        N'{"actual":{"modo":"al_corregir","acceso":"libre","revision":1}}'
+      FROM @NuevaPublicacion;
+    SELECT Id FROM @NuevaPublicacion;`,
+  { Actividad: actividad.Id, Comision: input.IdMateriaDivision, Inicio: input.FechaInicio,
+    Fin: input.FechaFin, Usuario: actor.id ?? null, Rol: actor.role })).recordset[0];
   await insertarEstructura(db, actor, actividad.Id, grupos);
   const importaciones = input.ImportacionesBanco ? await copiarBanco(db, actor, actividad.Id, input.ImportacionesBanco) : [];
   let banco: any[] = [];

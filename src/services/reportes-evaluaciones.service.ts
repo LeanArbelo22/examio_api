@@ -18,6 +18,8 @@ const bindFilters = (request: sql.Request, filters: RendimientoEvaluacionesQuery
   if (filters.estado) request.input('Estado', sql.NVarChar, filters.estado);
   if (filters.fechaDesde) request.input('FechaDesde', sql.DateTime2, new Date(filters.fechaDesde));
   if (filters.fechaHasta) request.input('FechaHasta', sql.DateTime2, new Date(filters.fechaHasta));
+  if (filters.tipoIncidente) request.input('TipoIncidente', sql.VarChar(30), filters.tipoIncidente);
+  if (filters.severidad) request.input('Severidad', sql.VarChar(30), filters.severidad);
   return request;
 };
 
@@ -90,6 +92,21 @@ export const getRendimientoEvaluacionesReport = async (
     : filters.conPendientesCorreccion === false
       ? 'DELETE FROM #ReporteEvaluaciones WHERE IntentosPendientesCorreccion>0;'
       : '';
+  const incidentTypeClause = filters.tipoIncidente ? 'AND E.Tipo=@TipoIncidente' : '';
+  const incidentSeverityClause = filters.severidad
+    ? "AND COALESCE(DS.Accion,'sin_clasificar')=@Severidad"
+    : '';
+  const unreviewedClause = filters.soloIncidentesSinRevisar === true
+    ? "AND COALESCE(RI.Estado,'pendiente')='pendiente'"
+    : '';
+  const incidentFilterActive = Boolean(
+    filters.tipoIncidente || filters.severidad || filters.soloIncidentesSinRevisar === true,
+  );
+  const incidentPublicationFilter = filters.conIncidentes === true || incidentFilterActive
+    ? 'DELETE FROM #ReporteEvaluaciones WHERE TotalIncidentes=0;'
+    : filters.conIncidentes === false
+      ? 'DELETE FROM #ReporteEvaluaciones WHERE TotalIncidentes>0;'
+      : '';
 
   const result = await request.query(`
     SET NOCOUNT ON;
@@ -128,6 +145,30 @@ export const getRendimientoEvaluacionesReport = async (
     LEFT JOIN InscripcionMateria IM ON IM.IdMateriaDivision = PA.IdMateriaDivision
     GROUP BY PA.IdPublicacion;
 
+    SELECT PA.IdPublicacion,E.Id AS IdIncidente,E.IdIntento,I.IdAlumno,I.Estado AS EstadoIntento,
+      COALESCE(RI.Estado,'pendiente') AS EstadoRevision
+    INTO #IncidentesFiltrados
+    FROM #PublicacionesAlcanzadas PA
+    JOIN Intento I ON I.IdPublicacion=PA.IdPublicacion
+    JOIN IncidenteIntento E ON E.IdIntento=I.Id
+    JOIN TipoEventoTelemetria TE ON TE.Tipo=E.Tipo AND TE.EsIncidente=1
+    LEFT JOIN DecisionSupervisionIntento DS
+      ON DS.IdIntento=E.IdIntento AND DS.EventoId=E.EventoId
+    OUTER APPLY (
+      SELECT TOP (1) R.Estado
+      FROM RevisionIncidenteIntento R
+      WHERE R.IdIncidente=E.Id
+      ORDER BY R.Revision DESC
+    ) RI
+    WHERE 1=1 ${incidentTypeClause} ${incidentSeverityClause} ${unreviewedClause};
+
+    SELECT IdPublicacion,COUNT_BIG(*) AS TotalIncidentes,
+      COUNT(DISTINCT IdAlumno) AS AlumnosConIncidentes,
+      SUM(CASE WHEN EstadoRevision='pendiente' THEN 1 ELSE 0 END) AS IncidentesSinRevisar
+    INTO #Incidentes
+    FROM #IncidentesFiltrados
+    GROUP BY IdPublicacion;
+
     SELECT
       PA.IdPublicacion,
       COUNT(I.Id) AS IntentosTotales,
@@ -161,6 +202,10 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(IT.EnProgreso, 0) AS EnProgreso,
       COALESCE(IT.Vencidos, 0) AS Vencidos,
       COALESCE(IT.Anulados, 0) AS Anulados,
+      COALESCE(IT.Anulados, 0) AS IntentosAnulados,
+      COALESCE(INC.AlumnosConIncidentes, 0) AS AlumnosConIncidentes,
+      COALESCE(INC.TotalIncidentes, 0) AS TotalIncidentes,
+      COALESCE(INC.IncidentesSinRevisar, 0) AS IncidentesSinRevisar,
       COALESCE(IT.IntentosAlcanceAcademico, 0) AS IntentosAlcanceAcademico,
       COALESCE(IT.IntentosCalificados, 0) AS IntentosCalificados,
       COALESCE(IT.IntentosPendientesCorreccion, 0) AS IntentosPendientesCorreccion,
@@ -183,9 +228,11 @@ export const getRendimientoEvaluacionesReport = async (
     INTO #ReporteEvaluaciones
     FROM #PublicacionesAlcanzadas PA
     LEFT JOIN #Padrones PD ON PD.IdPublicacion = PA.IdPublicacion
-    LEFT JOIN #Intentos IT ON IT.IdPublicacion = PA.IdPublicacion;
+    LEFT JOIN #Intentos IT ON IT.IdPublicacion = PA.IdPublicacion
+    LEFT JOIN #Incidentes INC ON INC.IdPublicacion = PA.IdPublicacion;
 
     ${pendingFilter}
+    ${incidentPublicationFilter}
 
     SELECT
       COUNT(*) AS TotalEvaluaciones,
@@ -200,6 +247,10 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(EnProgreso), 0) AS TotalEnProgreso,
       COALESCE(SUM(Vencidos), 0) AS TotalVencidos,
       COALESCE(SUM(Anulados), 0) AS TotalAnulados,
+      COALESCE(SUM(IntentosAnulados), 0) AS IntentosAnulados,
+      COALESCE(SUM(AlumnosConIncidentes), 0) AS AlumnosConIncidentes,
+      COALESCE(SUM(TotalIncidentes), 0) AS TotalIncidentes,
+      COALESCE(SUM(IncidentesSinRevisar), 0) AS IncidentesSinRevisar,
       COALESCE(SUM(IntentosAlcanceAcademico), 0) AS TotalIntentosAlcanceAcademico,
       COALESCE(SUM(IntentosCalificados), 0) AS TotalIntentosCalificados,
       COALESCE(SUM(IntentosPendientesCorreccion), 0) AS IntentosPendientesCorreccion,
@@ -253,6 +304,10 @@ export const getRendimientoEvaluacionesReport = async (
       EnProgreso,
       Vencidos,
       Anulados,
+      IntentosAnulados,
+      AlumnosConIncidentes,
+      TotalIncidentes,
+      IncidentesSinRevisar,
       IntentosAlcanceAcademico,
       IntentosCalificados,
       IntentosPendientesCorreccion,
@@ -279,6 +334,10 @@ export const getRendimientoEvaluacionesReport = async (
       alcanceIntentos: filters.alcanceIntentos,
       escalaPromedio: 10,
       conPendientesCorreccion: filters.conPendientesCorreccion ?? null,
+      conIncidentes: filters.conIncidentes ?? null,
+      tipoIncidente: filters.tipoIncidente ?? null,
+      severidad: filters.severidad ?? null,
+      soloIncidentesSinRevisar: filters.soloIncidentesSinRevisar ?? null,
     },
     kpis,
     graficos: { distribucionResultados },

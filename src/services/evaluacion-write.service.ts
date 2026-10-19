@@ -265,6 +265,16 @@ export async function crearEvaluacion(db: DbBanco, actor: ActorBanco, input: Act
     INSERT INTO dbo.PoliticaRevisionPublicacion
       (IdPublicacion,Modo,Acceso,Revision,ModificadoPor)
       SELECT Id,'al_corregir','libre',1,@Usuario FROM @NuevaPublicacion;
+    INSERT INTO dbo.PoliticaSupervisionPublicacion
+      (IdPublicacion,PantallaCompletaObligatoria,CodigoConfiguracion,Revision,ModificadoPor)
+      SELECT Id,1,'temporal-v1',1,@Usuario FROM @NuevaPublicacion;
+    INSERT INTO dbo.ReglaSupervisionPublicacion
+      (IdPublicacion,Codigo,TipoEvento,Metrica,Umbral,VentanaSegundos,Prioridad,Accion,Activa)
+      SELECT Id,'temporal-focus-1','focus_lost','cantidad',1,NULL,100,'anular_intento',1
+      FROM @NuevaPublicacion
+      UNION ALL
+      SELECT Id,'temporal-fullscreen-1','fullscreen_exit','cantidad',1,NULL,100,'anular_intento',1
+      FROM @NuevaPublicacion;
     INSERT INTO dbo.AuditoriaRevisionIntento
       (IdPublicacion,IdUsuario,ActorRol,Accion,Detalle)
       SELECT Id,@Usuario,@Rol,'politica_actualizada',

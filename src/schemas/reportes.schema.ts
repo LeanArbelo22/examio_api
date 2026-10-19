@@ -24,6 +24,12 @@ export const RendimientoEvaluacionesQuerySchema = z.object({
   fechaHasta: z.string().refine(isIsoDate, 'fechaHasta debe ser una fecha ISO 8601 válida').optional(),
   alcanceIntentos: z.enum(['todos', 'validos']).default('todos'),
   conPendientesCorreccion: optionalBoolean,
+  conIncidentes: optionalBoolean,
+  tipoIncidente: z.string().trim().min(1).max(30).optional(),
+  severidad: z.enum([
+    'sin_clasificar', 'informar', 'advertir', 'bloquear_interfaz', 'anular_intento',
+  ]).optional(),
+  soloIncidentesSinRevisar: optionalBoolean,
   pagina: z.preprocess(
     (value) => value === undefined ? 1 : Number(value),
     z.number().int().positive(),
@@ -47,6 +53,14 @@ export const RendimientoEvaluacionesQuerySchema = z.object({
       code: 'custom',
       path: ['fechaHasta'],
       message: 'fechaDesde no puede ser posterior a fechaHasta',
+    });
+  }
+  if (value.conIncidentes === false &&
+      (value.tipoIncidente || value.severidad || value.soloIncidentesSinRevisar === true)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['conIncidentes'],
+      message: 'conIncidentes=false no admite filtros de incidentes',
     });
   }
 });

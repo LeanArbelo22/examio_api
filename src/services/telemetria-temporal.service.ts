@@ -8,6 +8,7 @@ import {
   TOLERANCIA_RELOJ_MS,
   TOLERANCIA_SINCRONIZACION_MS,
 } from './telemetria-focus.service';
+import { evaluarEventoSupervision } from './supervision.service';
 
 type AlcanceTemporal = {
   Id: number;
@@ -222,7 +223,9 @@ export async function guardarEventoTemporal(
     }
     validarCoincidencia(existente, input);
     if (existente.Estado === 'completado' || input.FechaFinCliente === undefined) {
-      return { ...existente, Resultado: 'replay', VentanaSincronizacionHasta: ventanaHasta(alcance) };
+      const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'replay');
+      return { ...existente, Resultado: 'replay', VentanaSincronizacionHasta: ventanaHasta(alcance),
+        Supervision: supervision };
     }
     if (!Boolean(tipo.EsIntervalo) || !Boolean(tipo.AdmiteCierrePosterior)) {
       throw new BancoError(409, 'El evento no admite cierre posterior', 'TELEMETRY_EVENT_CONFLICT');
@@ -236,7 +239,9 @@ export async function guardarEventoTemporal(
       .query(`UPDATE dbo.IncidenteIntento SET FechaFinCliente=@FechaFinCliente,
         DuracionMilisegundos=@DuracionMilisegundos,FechaRecepcionFin=SYSUTCDATETIME(),Estado='completado'
         OUTPUT inserted.* WHERE Id=@Id;`);
-    return { ...result.recordset[0], Resultado: 'actualizado', VentanaSincronizacionHasta: ventanaHasta(alcance) };
+    const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'actualizado');
+    return { ...result.recordset[0], Resultado: 'actualizado', VentanaSincronizacionHasta: ventanaHasta(alcance),
+      Supervision: supervision };
   }
 
   if (!input.FechaInicioCliente) {
@@ -271,7 +276,9 @@ export async function guardarEventoTemporal(
       VALUES(@EventoId,@IdIntento,@Tipo,@IdIntentoPregunta,@SesionClienteId,@SecuenciaCliente,
        @FechaInicioCliente,@FechaFinCliente,@DuracionMilisegundos,@Codigo,@VersionContrato,
        CASE WHEN @Estado='completado' THEN SYSUTCDATETIME() ELSE NULL END,@Estado);`);
-  return { ...result.recordset[0], Resultado: 'creado', VentanaSincronizacionHasta: ventanaHasta(alcance) };
+  const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'creado');
+  return { ...result.recordset[0], Resultado: 'creado', VentanaSincronizacionHasta: ventanaHasta(alcance),
+    Supervision: supervision };
 }
 
 export async function listarEventosTemporales(

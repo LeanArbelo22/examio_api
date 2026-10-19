@@ -355,6 +355,10 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         TotalEnProgreso: 15,
         TotalVencidos: 5,
         TotalAnulados: 10,
+        IntentosAnulados: 10,
+        AlumnosConIncidentes: 8,
+        TotalIncidentes: 21,
+        IncidentesSinRevisar: 5,
         TotalIntentosCalificados: 210,
         IntentosPendientesCorreccion: 20,
         PromedioIntentosCalificados: 7.15,
@@ -387,6 +391,10 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         EnProgreso: 1,
         Vencidos: 1,
         Anulados: 1,
+        IntentosAnulados: 1,
+        AlumnosConIncidentes: 4,
+        TotalIncidentes: 7,
+        IncidentesSinRevisar: 2,
         IntentosCalificados: 24,
         IntentosPendientesCorreccion: 3,
         PromedioIntentosCalificados: 7.15,
@@ -420,6 +428,10 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       intentosCalificados: 24,
       intentosPendientesCorreccion: 3,
       porcentajeAprobacionIntentos: 75,
+      intentosAnulados: 1,
+      alumnosConIncidentes: 4,
+      totalIncidentes: 7,
+      incidentesSinRevisar: 2,
     });
     expect(res.body.data.paginacion).toEqual({ pagina: 1, limite: 20, total: 12, totalPaginas: 1 });
     expect(reqBuilder.input).toHaveBeenCalledWith('IdDocente', 'INT', 100542);
@@ -491,6 +503,29 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     expect(res.body.data.paginacion.pagina).toBe(2);
   });
 
+  it('agrega filtros operativos y excluye eventos que no son incidentes', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?conIncidentes=true&tipoIncidente=focus_lost&severidad=anular_intento&soloIncidentesSinRevisar=true')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios).toMatchObject({
+      conIncidentes: true,
+      tipoIncidente: 'focus_lost',
+      severidad: 'anular_intento',
+      soloIncidentesSinRevisar: true,
+    });
+    expect(reqBuilder.input).toHaveBeenCalledWith('TipoIncidente', expect.anything(), 'focus_lost');
+    expect(reqBuilder.input).toHaveBeenCalledWith('Severidad', expect.anything(), 'anular_intento');
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('TE.EsIncidente=1');
+    expect(sqlText).toContain('DELETE FROM #ReporteEvaluaciones WHERE TotalIncidentes=0');
+    expect(sqlText.indexOf('AS TotalIncidentes')).toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
+  });
+
   it.each([
     'idMateria=0',
     'idMateriaDivision=abc',
@@ -505,6 +540,9 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     'ordenDireccion=lateral',
     'fechaDesde=no-es-fecha',
     'fechaDesde=2026-02-31',
+    'conIncidentes=si',
+    'severidad=critica',
+    'conIncidentes=false&tipoIncidente=focus_lost',
     'filtroDesconocido=1',
   ])('devuelve REQUEST_INVALID para query inválida: %s', async (query) => {
     const res = await request(app)

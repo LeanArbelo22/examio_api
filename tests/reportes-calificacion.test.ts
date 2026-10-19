@@ -111,6 +111,10 @@ describe('Etapa 5 - reportes con escalas y alcance académico', () => {
       alcanceIntentos: 'todos',
       escalaPromedio: 10,
       conPendientesCorreccion: null,
+      conIncidentes: null,
+      tipoIncidente: null,
+      severidad: null,
+      soloIncidentesSinRevisar: null,
     });
     expect(res.body.data.kpis).toMatchObject({
       promedioIntentosCalificados: 7.5,

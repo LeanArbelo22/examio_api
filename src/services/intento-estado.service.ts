@@ -16,6 +16,7 @@ type ScopeIntentoEstado = {
 };
 
 const autorizarAlumnoOAdmin = (actor: ActorBanco, scope: ScopeIntentoEstado) => {
+  if (actor.role === 'sistema') return;
   if (!Number.isInteger(actor.id) || !actor.id || actor.id <= 0) {
     throw new BancoError(403, 'No se pudo identificar al usuario', 'ATTEMPT_SCOPE_FORBIDDEN');
   }
@@ -61,18 +62,19 @@ async function obtenerScopeBloqueado(db: DbBanco, idIntento: number): Promise<Sc
   return scope;
 }
 
-export async function anularIntentoPorIncidente(
+export async function anularIntentoPorIncidenteEnDb(
+  db: DbBanco,
   actor: ActorBanco,
   idIntento: number,
   eventoId: string,
+  motivoSistema?: string,
 ) {
-  return atomico(async tx => {
-    const scope = await obtenerScopeBloqueado(tx, idIntento);
+    const scope = await obtenerScopeBloqueado(db, idIntento);
     autorizarAlumnoOAdmin(actor, scope);
 
-    const existenteResult = await tx.request()
+    const existenteResult = await db.request()
       .input('IdIntento', sql.Int, idIntento)
-      .query(`SELECT IdIntento,EventoId,TipoIncidente,Motivo,AnuladoPor,FechaAnulacion
+      .query(`SELECT IdIntento,EventoId,TipoIncidente,Motivo,AnuladoPor,ActorTipo,FechaAnulacion
         FROM dbo.AnulacionIntentoIncidente WITH (UPDLOCK,HOLDLOCK)
         WHERE IdIntento=@IdIntento;`);
     const existente = existenteResult.recordset[0] as Record<string, unknown> | undefined;
@@ -87,25 +89,34 @@ export async function anularIntentoPorIncidente(
       throw new BancoError(409, 'Sólo puede anularse un intento en progreso', 'ATTEMPT_NOT_IN_PROGRESS');
     }
 
-    const incidenteResult = await tx.request()
+    const incidenteResult = await db.request()
       .input('IdIntento', sql.Int, idIntento)
       .input('EventoId', sql.UniqueIdentifier, eventoId)
-      .query(`SELECT Id,Tipo FROM dbo.IncidenteIntento WITH (UPDLOCK,HOLDLOCK)
-        WHERE IdIntento=@IdIntento AND EventoId=@EventoId;`);
-    const incidente = incidenteResult.recordset[0] as { Tipo: string } | undefined;
-    if (!incidente || !['focus_lost', 'fullscreen_exit'].includes(incidente.Tipo)) {
+      .query(`SELECT E.Id,E.Tipo,T.EsIncidente
+        FROM dbo.IncidenteIntento E WITH (UPDLOCK,HOLDLOCK)
+        JOIN dbo.TipoEventoTelemetria T ON T.Tipo=E.Tipo
+        WHERE E.IdIntento=@IdIntento AND E.EventoId=@EventoId;`);
+    const incidente = incidenteResult.recordset[0] as { Tipo: string; EsIncidente: boolean | number } | undefined;
+    const tipoLegacyPermitido = incidente && ['focus_lost', 'fullscreen_exit'].includes(incidente.Tipo);
+    const esIncidente = incidente && (incidente.EsIncidente === undefined
+      ? Boolean(tipoLegacyPermitido) : Boolean(incidente.EsIncidente));
+    if (!incidente || !esIncidente
+        || (actor.role !== 'sistema' && !tipoLegacyPermitido)) {
       throw new BancoError(409, 'El incidente no existe o no habilita la anulación', 'INCIDENT_EVENT_NOT_ELIGIBLE');
     }
 
-    const motivo = incidente.Tipo === 'fullscreen_exit'
+    const motivo = actor.role === 'sistema'
+      ? (motivoSistema ?? 'SUPERVISION_POLICY_RULE')
+      : incidente.Tipo === 'fullscreen_exit'
       ? 'POLICY_FIRST_FULLSCREEN_EXIT'
       : 'POLICY_FIRST_FOCUS_LOSS';
-    const result = await tx.request()
+    const result = await db.request()
       .input('IdIntento', sql.Int, idIntento)
       .input('EventoId', sql.UniqueIdentifier, eventoId)
       .input('TipoIncidente', sql.VarChar(30), incidente.Tipo)
       .input('Motivo', sql.VarChar(100), motivo)
-      .input('AnuladoPor', sql.Int, actor.id!)
+      .input('AnuladoPor', sql.Int, actor.role === 'sistema' ? null : actor.id!)
+      .input('ActorTipo', sql.VarChar(20), actor.role === 'sistema' ? 'sistema' : 'usuario')
       .query(`
         UPDATE dbo.Intento
         SET Estado='anulado',FechaFin=COALESCE(FechaFin,SYSUTCDATETIME()),
@@ -117,16 +128,25 @@ export async function anularIntentoPorIncidente(
         IF @@ROWCOUNT<>1 THROW 51330,'El intento ya no está en progreso',1;
 
         INSERT INTO dbo.AnulacionIntentoIncidente
-          (IdIntento,EventoId,TipoIncidente,Motivo,AnuladoPor)
-        VALUES(@IdIntento,@EventoId,@TipoIncidente,@Motivo,@AnuladoPor);
+          (IdIntento,EventoId,TipoIncidente,Motivo,AnuladoPor,ActorTipo)
+        VALUES(@IdIntento,@EventoId,@TipoIncidente,@Motivo,@AnuladoPor,@ActorTipo);
 
-        SELECT A.IdIntento,A.EventoId,A.TipoIncidente,A.Motivo,A.AnuladoPor,
+        SELECT A.IdIntento,A.EventoId,A.TipoIncidente,A.Motivo,A.AnuladoPor,A.ActorTipo,
                A.FechaAnulacion,I.Estado,CAST(0 AS bit) AS Replay
         FROM dbo.AnulacionIntentoIncidente A
         JOIN dbo.Intento I ON I.Id=A.IdIntento
         WHERE A.IdIntento=@IdIntento;
       `);
     return result.recordset[0];
+}
+
+export async function anularIntentoPorIncidente(
+  actor: ActorBanco,
+  idIntento: number,
+  eventoId: string,
+) {
+  return atomico(async tx => {
+    return anularIntentoPorIncidenteEnDb(tx, actor, idIntento, eventoId);
   });
 }
 

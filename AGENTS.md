@@ -96,7 +96,8 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Intentos | Inicio, respuestas, entrega, corrección e historial propio filtrable | archivos `intentos.*`, services `intento-*` | Flujo crítico y dependiente de SPs |
 | Revisión | Políticas, permisos, sesiones breves y contenido autorizado | archivos `revision.*`, `revision-examen.service.ts` | Corrección confirmada es precondición; contenido alumno sólo por sesión |
 | Actas | Cabecera, detalles y cierre | archivos `actas.*` | Operaciones transaccionales y estados |
-| Telemetría | Navegación, eventos temporales e incidentes con duración | archivos `telemetria.*`, services `telemetria-*` | UUID + sesión/secuencia idempotentes; lote offline; sin consecuencias automáticas |
+| Telemetría | Navegación, eventos temporales e incidentes con duración y revisión operativa | archivos `telemetria.*`, `incidentes.*`, services `telemetria-*`, `visibilidad-incidentes.service.ts` | UUID + sesión/secuencia idempotentes; las consecuencias se delegan a Supervisión |
+| Supervisión | Políticas, snapshots, decisiones y overrides sobre incidentes | archivos `supervision.*`, `supervision.service.ts` | Consecuencias sólo tras evaluación autoritativa; `temporal-v1` es el default |
 | Usuarios | Cuentas, hashes, roles y activación | archivos `usuarios.*` | Integridad cruzada con Alumno/Docente |
 | Reportes | Rendimiento por alumno, evaluación, pregunta, variante, grupo y opción | archivos `reportes.*`, `reportes-preguntas.service.ts` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
 
@@ -183,7 +184,7 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 24 suites y 479 tests pasan, también con
+Estado de referencia reciente: 26 suites y 513 tests pasan, también con
 `--runInBand --detectOpenHandles`.
 Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
 revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
@@ -245,10 +246,21 @@ Convenciones:
   revisar su verificador/planes con volumen representativo. Los endpoints agrupan por hash
   snapshot, normalizan puntaje por máximo y calculan tiempos por unión de intervalos.
 - La etapa 5 de revisión está implementada y requiere aplicar manualmente
-  `20261018_revision_examen.sql` y su verificador antes de desplegar el backend. Agrega
+  `20261018_revision_examen.sql` y luego
+  `20261019_semantica_revision_unica.sql`, con sus verificadores, antes de desplegar el backend. Agrega
   políticas por publicación, permisos por intento, sesiones UUID de cinco minutos y
-  auditoría. El backfill compatible es `al_corregir + libre`; `/completo` ya no entrega
-  contenido a alumnos, que deben consumirlo mediante una sesión autorizada.
+  auditoría. El consumo `unico` queda persistido por intento y la expiración se limita
+  también por ventana o permiso. El backfill compatible es `al_corregir + libre`;
+  `/completo` ya no entrega contenido a alumnos, que deben consumirlo mediante una sesión
+  autorizada.
+- La etapa 6 de supervisión está implementada y requiere aplicar manualmente
+  `20261019_politicas_supervision.sql` dos veces y ejecutar su verificador. Congela reglas
+  por intento, evalúa eventos dentro de su transacción y reutiliza la anulación existente
+  con actor `sistema`. No asumirla aplicada en otros ambientes.
+- La etapa 7 de visibilidad operativa está implementada y requiere aplicar manualmente
+  `20261020_visibilidad_incidentes.sql` dos veces y ejecutar su verificador. Agrega
+  revisión append-only de incidentes y amplía aditivamente rendimiento por evaluación;
+  no modifica notas, escalas ni decisiones de supervisión.
 - Etapas 1 a 6 de calificación implementadas: configuración 10/100, puntaje por grupo,
   corrección por puntaje sobre `IntentoPregunta`, recálculo, override final auditado y
   selección automática/manual del intento válido, más historial propio filtrable basado
@@ -324,14 +336,24 @@ Convenciones:
   suman y los solapados deben unirse. `MetricasNavegacion` sólo es fallback por pregunta
   cuando no existe `question_active` nuevo. Este evento usa `idIntentoPregunta` entregado
   por el render, nunca `idPregunta`. Los endpoints legacy no se paginan.
-- Registrar un incidente no anula el intento. La consecuencia sólo se aplica mediante
-  `PUT /intentos/:idIntento/anular-por-incidente/:eventoId`, que conserva respuestas,
-  exige estado en progreso y audita una única anulación.
+- Registrar un incidente sólo produce una consecuencia después de evaluar el snapshot de
+  supervisión. `PUT /intentos/:idIntento/anular-por-incidente/:eventoId` permanece como
+  contrato legacy; la etapa 6 reutiliza internamente el mismo servicio, conserva
+  respuestas, exige estado en progreso y audita una única anulación.
+- Las reglas vivas de una publicación sólo afectan intentos futuros. Evaluar siempre
+  `IntentoReglaSupervision`; la severidad de la acción prevalece sobre `Prioridad` y los
+  replays deben reutilizar la decisión única `(IdIntento,EventoId)`.
+- La revisión operativa de un incidente no determina fraude ni altera su consecuencia.
+  Sólo los tipos con `TipoEventoTelemetria.EsIncidente=1` cuentan. Sin revisión
+  persistida, el estado es `pendiente` y la revisión es `0`; los cambios agregan filas
+  en `RevisionIncidenteIntento` y reutilizan `OperacionIdempotente`.
 - La revisión del alumno exige corrección confirmada y autorización efectiva. Una
-  revocación individual prevalece; un permiso activo autoriza ese intento; la política
-  general sólo alcanza al intento válido actual. Las sesiones congelan la autorización,
-  vencen en cinco minutos y, en acceso `unico`, sólo admiten un consumo atómico. No
-  volver a exponer claves por `/intentos/:id/completo` para alumnos.
+  política `nunca` prevalece incluso sobre permisos; `manual` exige un permiso activo;
+  una revocación individual prevalece y la política general sólo alcanza al intento válido
+  actual. Las sesiones congelan la autorización y vencen al mínimo entre cinco minutos y
+  el fin de ventana/permiso. En acceso `unico`, el consumo se persiste por `IdIntento` y
+  no se restablece al cambiar temporalmente a `libre`. No volver a exponer claves por
+  `/intentos/:id/completo` para alumnos.
 - Las transacciones de evaluaciones y actas deben hacer rollback ante cualquier
   fallo.
 - Estados incompletos: vencimiento automático, anulación manual, firma de acta y

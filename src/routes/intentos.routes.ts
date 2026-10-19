@@ -3,6 +3,7 @@ import { iniciarExamen, guardarRespuesta, finalizarExamen, getHistorialPorAlumno
 import { checkRole, validateRequest } from '../middlewares/auth.middleware';
 import { IniciarExamenSchema, GuardarRespuestaSchema, CalificarSchema, CorregirRespuestaSchema } from '../schemas/intento.schema';
 import { deletePermisoRevision, getRevisionDisponible, putPermisoRevision } from '../controllers/revision.controller';
+import { getDetalleSupervision, getEstadoSupervision, putOverrideSupervision } from '../controllers/supervision.controller';
 
 const router = Router();
 
@@ -18,6 +19,9 @@ router.get('/:idIntento/completo', checkRole(['admin', 'docente', 'alumno']), ge
 router.get('/:idIntento/revision-disponible', checkRole(['admin', 'docente', 'alumno']), getRevisionDisponible);
 router.put('/:idIntento/permiso-revision', checkRole(['admin', 'docente']), putPermisoRevision);
 router.delete('/:idIntento/permiso-revision', checkRole(['admin', 'docente']), deletePermisoRevision);
+router.get('/:idIntento/supervision', checkRole(['admin', 'docente', 'alumno']), getEstadoSupervision);
+router.get('/:idIntento/supervision/detalle', checkRole(['admin', 'docente']), getDetalleSupervision);
+router.put('/:idIntento/supervision/override', checkRole(['admin', 'docente']), putOverrideSupervision);
 router.put('/:idIntento/calificar', checkRole(['admin', 'docente']), validateRequest(CalificarSchema), calificarIntento);
 router.put('/:idIntento/confirmar-correccion', checkRole(['admin', 'docente']), confirmarCorreccion);
 router.put('/:idIntento/preguntas/:idPregunta/corregir', checkRole(['docente']), validateRequest(CorregirRespuestaSchema), corregirRespuesta);

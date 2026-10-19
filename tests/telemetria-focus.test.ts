@@ -202,7 +202,7 @@ describe('Etapa 6 - incidentes de pérdida de foco', () => {
       .send(completoBody()));
 
     expect(res.status).toBe(200);
-    expect(mock.transactionRequest.query).toHaveBeenCalledTimes(2);
+    expect(mock.transactionRequest.query).toHaveBeenCalledTimes(3);
   });
 
   it('rechaza reutilizar EventoId con datos incompatibles y revierte', async () => {

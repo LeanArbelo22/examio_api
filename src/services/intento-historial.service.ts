@@ -82,9 +82,12 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
       I.CorreccionConfirmada,
       CAST(CASE WHEN I.CorreccionConfirmada=1 THEN 0 ELSE 1 END AS bit) AS CorreccionPendiente,
       COALESCE(PR.Modo,'al_corregir') AS ModoRevision,
+      COALESCE(PR.Acceso,'libre') AS AccesoPoliticaRevision,
       PR.VentanaDesde AS RevisionVentanaDesde,PR.VentanaHasta AS RevisionVentanaHasta,
-      PE.Estado AS EstadoPermisoRevision,PE.FechaDesde AS PermisoRevisionDesde,
+      PE.Estado AS EstadoPermisoRevision,PE.Acceso AS AccesoPermisoRevision,
+      PE.FechaDesde AS PermisoRevisionDesde,
       PE.FechaHasta AS PermisoRevisionHasta,
+      CU.IdIntento AS IdConsumoRevisionUnica,
       A.EscalaCalificacion,
       A.NotaAprobacion,
       CASE WHEN I.NotaFinal IS NULL THEN 'pendiente'
@@ -112,6 +115,7 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
       ON O.IdPublicacion=I.IdPublicacion AND O.IdAlumno=I.IdAlumno
     LEFT JOIN dbo.PoliticaRevisionPublicacion PR ON PR.IdPublicacion=I.IdPublicacion
     LEFT JOIN dbo.PermisoRevisionIntento PE ON PE.IdIntento=I.Id
+    LEFT JOIN dbo.ConsumoRevisionUnicaIntento CU ON CU.IdIntento=I.Id
     OUTER APPLY (
       SELECT SUM(CASE WHEN IP.PuntajeObtenido IS NULL THEN 1 ELSE 0 END) AS PendientesCorreccion
       FROM dbo.IntentoPregunta IP WHERE IP.IdIntento=I.Id
@@ -125,20 +129,24 @@ export async function obtenerMisIntentos(idAlumno: number, filters: MisIntentosQ
       B.NotaAprobacion,B.Resultado,B.EstadoCorreccion,B.CorreccionPendiente,
       B.CorreccionConfirmada,
       CAST(CASE WHEN B.Estado='entregado' AND B.CorreccionConfirmada=1
+        AND B.ModoRevision<>'nunca'
         AND ISNULL(B.EstadoPermisoRevision,'')<>'revocado'
         AND (
           (B.EstadoPermisoRevision='activo'
             AND (B.PermisoRevisionDesde IS NULL OR B.PermisoRevisionDesde<=SYSUTCDATETIME())
-            AND (B.PermisoRevisionHasta IS NULL OR B.PermisoRevisionHasta>=SYSUTCDATETIME()))
+            AND (B.PermisoRevisionHasta IS NULL OR B.PermisoRevisionHasta>SYSUTCDATETIME())
+            AND NOT (B.AccesoPermisoRevision='unico' AND B.IdConsumoRevisionUnica IS NOT NULL))
           OR
           ((B.EstadoPermisoRevision IS NULL OR B.EstadoPermisoRevision<>'activo'
-              OR B.PermisoRevisionDesde>SYSUTCDATETIME()
-              OR B.PermisoRevisionHasta<SYSUTCDATETIME())
+              OR (B.PermisoRevisionDesde IS NOT NULL AND B.PermisoRevisionDesde>SYSUTCDATETIME())
+              OR (B.PermisoRevisionHasta IS NOT NULL AND B.PermisoRevisionHasta<=SYSUTCDATETIME()))
+            AND B.ModoRevision<>'manual'
             AND (B.IdIntentoOverride=B.IdIntento OR
               (B.IdIntentoOverride IS NULL AND B.OrdenAutomatico=1))
             AND (B.ModoRevision='al_corregir' OR
               (B.ModoRevision='ventana' AND B.RevisionVentanaDesde<=SYSUTCDATETIME()
-                AND B.RevisionVentanaHasta>=SYSUTCDATETIME())))
+                AND B.RevisionVentanaHasta>SYSUTCDATETIME()))
+            AND NOT (B.AccesoPoliticaRevision='unico' AND B.IdConsumoRevisionUnica IS NOT NULL))
         ) THEN 1 ELSE 0 END AS bit) AS RevisionDisponible,
       CAST(CASE WHEN B.Estado='entregado' AND (
         B.IdIntentoOverride=B.IdIntento OR

@@ -232,7 +232,7 @@ umbral o método estadístico. El contrato expone diferencia porcentual y tamañ
 
 ## Evolución — etapa 5: políticas y sesiones de revisión
 
-**Estado: BACKEND IMPLEMENTADO — PENDIENTE MIGRACIÓN, SQL REAL E INTEGRACIÓN FRONTEND**
+**Estado: CORRECCIÓN BACKEND IMPLEMENTADA — PENDIENTE NUEVA MIGRACIÓN, SQL REAL Y AJUSTE FRONTEND**
 
 - [x] Agregar políticas por publicación: `nunca`, `al_corregir`, `ventana` y `manual`.
 - [x] Agregar acceso `unico|libre`, revisión optimista y auditoría de cambios.
@@ -246,17 +246,69 @@ umbral o método estadístico. El contrato expone diferencia porcentual y tamañ
 - [x] Crear migración idempotente, backfill compatible y verificador de sólo lectura.
 - [x] Agregar pruebas focalizadas de modos, ventanas, permisos, revocación, intento válido,
   sesiones, expiración, consumo, RBAC y auditoría.
-- [ ] Aplicar dos veces `20261018_revision_examen.sql` en SQL Server de prueba y ejecutar
+- [x] Corregir `nunca` como prohibición absoluta y `manual` como autorización sólo
+  individual, manteniendo los paths y payloads existentes.
+- [x] Persistir el consumo `unico` por intento para impedir nuevas emisiones después de
+  la primera apertura real, sin agotarlo por una sesión vencida sin consumo.
+- [x] Limitar cada expiración al mínimo entre 300 segundos, ventana general y permiso
+  individual, y ampliar aditivamente el contrato de disponibilidad.
+- [x] Crear `20261019_semantica_revision_unica.sql` y su verificador de sólo lectura.
+- [x] Aplicar dos veces `20261018_revision_examen.sql` en SQL Server de prueba y ejecutar
   `verificar-revision-examen.sql`.
+- [ ] Aplicar dos veces `20261019_semantica_revision_unica.sql` después de la anterior y
+  ejecutar `verificar-semantica-revision-unica.sql`.
 - [ ] Probar emisión/consumo y revocación concurrentes contra SQL Server real.
-- [ ] Integrar en frontend configuración docente, permisos y revisión por sesión.
+- [x] Integrar en frontend configuración docente, permisos y revisión por sesión de la
+  etapa original.
+- [ ] Integrar en frontend los campos aditivos y motivos estables de la corrección
+  semántica, después de aplicar `20261019`.
 
-El despliegue de backend requiere aplicar primero la migración: la creación de nuevas
-publicaciones ya inserta la política default en la misma transacción. No se modificaron
-Stored Procedures ni datos académicos históricos.
+El despliegue de backend requiere aplicar ambas migraciones en orden. La creación de
+nuevas publicaciones ya inserta la política default en la misma transacción. No se
+modificaron Stored Procedures ni datos académicos históricos.
 
 **Siguiente trabajo funcional:** etapa 6, políticas configurables de pantalla completa
 e incidentes.
+
+---
+
+## Evolución — etapa 6: políticas configurables de fullscreen e incidentes
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE MIGRACIÓN, SQL REAL E INTEGRACIÓN FRONTEND**
+
+- [x] Agregar política y reglas versionadas por publicación.
+- [x] Congelar política, reglas y estado al iniciar o reanudar un intento.
+- [x] Mantener `temporal-v1` como configuración predeterminada compatible.
+- [x] Evaluar cantidad, duración individual y duración acumulada uniendo solapamientos.
+- [x] Aplicar prioridad autoritativa y devolver sólo la instrucción operativa al cliente.
+- [x] Reutilizar la anulación transaccional con actor `sistema` e idempotencia por evento.
+- [x] Mantener el guardado de respuestas durante bloqueos visuales.
+- [x] Incorporar detalle docente y overrides auditados sin reapertura de anulados.
+- [x] Crear `20261019_politicas_supervision.sql` y verificador de sólo lectura.
+- [x] Agregar cobertura focalizada de snapshots, prioridad, replay, recuperación,
+  anulación y override.
+- [ ] Aplicar la migración dos veces y ejecutar `verificar-politicas-supervision.sql`.
+- [ ] Probar eventos simultáneos, unicidad y anulación contra SQL Server real.
+- [ ] Integrar editor docente y acciones dirigidas por backend en el frontend.
+
+---
+
+## Evolución — etapa 7: visibilidad operativa de anulaciones e incidentes
+
+**Estado: BACKEND IMPLEMENTADO — PENDIENTE MIGRACIÓN, SQL REAL E INTEGRACIÓN FRONTEND**
+
+- [x] Crear historial append-only `RevisionIncidenteIntento` con revisión optimista.
+- [x] Reutilizar `OperacionIdempotente` para la revisión docente por evento.
+- [x] Excluir eventos con `EsIncidente=0` de listados y conteos operativos.
+- [x] Agregar listado por publicación con filtros, KPIs y navegación al intento.
+- [x] Ampliar aditivamente rendimiento por evaluación con anulaciones e incidentes.
+- [x] Mantener KPIs sobre todo el conjunto filtrado antes de paginar.
+- [x] Preservar `escalaCalificacion`, `notaAprobacion`, notas y estados académicos.
+- [x] Crear `20261020_visibilidad_incidentes.sql` y verificador de sólo lectura.
+- [x] Agregar cobertura de RBAC, filtros, conteos, revisión, replay y concurrencia optimista.
+- [ ] Aplicar la migración dos veces y ejecutar `verificar-visibilidad-incidentes.sql`.
+- [ ] Verificar consistencia listado/detalle, concurrencia y planes en SQL Server real.
+- [ ] Integrar badges, filtros y enlaces al intento en el frontend.
 
 ---
 
@@ -598,7 +650,7 @@ evaluaciones, además del detalle por publicación. No implementado en esta entr
 
 ### Evidencia de validación local
 
-- Suite completa actual: **24 suites / 479 pruebas aprobadas**, también con
+- Suite completa actual: **26 suites / 513 pruebas aprobadas**, también con
   `--runInBand --detectOpenHandles`. Jest finaliza naturalmente sin `--forceExit`.
 - Suite del banco: **66 pruebas aprobadas**; incluye integración HTTP de copias
   durante creación/edición, rollback, conflictos y aislamiento.

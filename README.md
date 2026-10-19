@@ -41,7 +41,7 @@ API REST desarrollada en Express 5 + TypeScript 6 que abstrae la lógica de nego
 | **mssql 12** | Driver TDS para SQL Server. `pool` es singleton. Soporta `sql.Transaction` para operaciones atómicas. |
 | **Zod 4** | Esquemas de validación en cada `POST`/`PUT`. El middleware `validateRequest` rechaza payloads inválidos con `400` + array `errors`. |
 | **jsonwebtoken + bcryptjs** | Autenticación stateless. `bcrypt.compare()` para contraseñas. JWT con payload `{ id, email, role, idAlumno, idDocente }` y expiración de 1 hora. |
-| **ts-jest + supertest** | 479 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
+| **ts-jest + supertest** | 513 tests de referencia con mock completo de `mssql`. Sin dependencia de BD real. Supertest importa `src/app.ts` sin abrir un puerto. |
 
 La construcción de Express está separada del arranque del proceso:
 
@@ -1417,8 +1417,10 @@ La operación es serializable e idempotente por intento/evento. Un replay devuel
 mismo resultado; otro evento para un intento ya anulado devuelve
 `409 ATTEMPT_ALREADY_CANCELLED`. Se conservan todas las respuestas sincronizadas, se
 marca el intento como `anulado` y todas sus notas quedan en `null`. La política temporal
-vigente considera la primera pérdida detectada; el frontend debe sincronizar respuestas
-pendientes antes de solicitar la anulación.
+legacy considera la primera pérdida detectada. Desde la etapa 6, el flujo principal no
+requiere que el frontend solicite esta operación: la evaluación de supervisión reutiliza
+el mismo servicio con actor auditado `sistema`. El endpoint permanece disponible por
+compatibilidad.
 
 #### Confirmación de corrección
 
@@ -1686,8 +1688,10 @@ Reglas:
   para sincronización tardía. Un replay idéntico ya persistido continúa siendo válido.
 - La diferencia entre timestamps y `DuracionMilisegundos` admite hasta dos segundos de
   desviación por temporizadores del navegador.
-- La pérdida de foco no anula, vence ni finaliza el intento y no crea consecuencias
-  automáticas. Los eventos se conservan aunque otro intento pase a ser el válido.
+- Persistir telemetría por sí solo no decide fraude ni cambia notas. Si existe un snapshot
+  de supervisión, el backend evalúa sus reglas y sólo entonces puede emitir una decisión
+  o aplicar la consecuencia configurada. Los eventos se conservan aunque otro intento
+  pase a ser el válido.
 - No se almacenan respuestas, tokens ni contenido del examen.
 
 **Resumen docente/admin:**
@@ -1933,6 +1937,10 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 | `fechaHasta` | ISO 8601 | `Publicacion.FechaInicio <= fechaHasta` |
 | `alcanceIntentos` | enum, default `todos` | `todos` calcula resultados sobre cada entrega; `validos` usa un único intento académico por alumno/publicación |
 | `conPendientesCorreccion` | boolean | `true` conserva evaluaciones con pendientes; `false`, sólo evaluaciones sin pendientes |
+| `conIncidentes` | boolean | `true` conserva publicaciones con incidentes; `false`, sólo publicaciones sin incidentes |
+| `tipoIncidente` | string | Tipo exacto del catálogo de telemetría |
+| `severidad` | enum | `sin_clasificar`, `informar`, `advertir`, `bloquear_interfaz` o `anular_intento` |
+| `soloIncidentesSinRevisar` | boolean | Con `true`, limita el alcance a incidentes operativamente pendientes |
 | `pagina` | entero, default `1` | Mínimo 1 |
 | `limite` | entero, default `20` | Entre 1 y 100 |
 | `ordenarPor` | enum, default `fecha` | `evaluacion`, `fecha`, `promedio`, `entregados`, `aprobacion`, `pendientesCorreccion` |
@@ -1971,6 +1979,12 @@ ser `YYYY-MM-DD` o timestamps ISO 8601; `fechaDesde` no puede superar
 - **Alcance operativo:** `intentosTotales`, estados y pendientes de corrección
   siempre cuentan todos los intentos alcanzados, independientemente de
   `alcanceIntentos`.
+- **Incidente:** evento cuyo tipo tiene `TipoEventoTelemetria.EsIncidente=1`; recargas,
+  reanudaciones y otros eventos operativos normales quedan excluidos.
+- **Severidad:** acción de la decisión autoritativa de supervisión. Los eventos
+  anteriores o sin decisión se informan como `sin_clasificar`; no se infiere fraude.
+- Cada publicación agrega `intentosAnulados`, `alumnosConIncidentes`,
+  `totalIncidentes` e `incidentesSinRevisar`. Los KPIs se calculan antes de paginar.
 - **Alcance académico:** calificados, promedio, aprobados y desaprobados usan todos
   los entregados cuando `alcanceIntentos=todos`. Con `validos` usan como máximo un
   entregado por alumno/publicación: el override manual si existe o, en caso
@@ -2349,11 +2363,14 @@ planes con volumen representativo antes de aceptar índices adicionales.
 La corrección confirmada sigue siendo obligatoria, pero ya no habilita por sí sola el
 contenido. La disponibilidad se resuelve con esta precedencia:
 
-1. corrección no confirmada: denegada;
-2. permiso individual revocado: denegada;
-3. permiso individual activo y dentro de sus fechas: autorizada;
-4. sin permiso individual: se aplica la política general;
-5. la política general sólo alcanza al intento válido actual.
+1. intento inexistente, ajeno o no entregado: denegado;
+2. corrección no confirmada: denegada;
+3. política `nunca`: denegada de forma absoluta, incluso si existe un permiso;
+4. permiso individual revocado: denegado;
+5. permiso individual activo y dentro de sus fechas: autoriza ese intento;
+6. política `manual` sin permiso vigente: denegada;
+7. `al_corregir` y `ventana` sólo alcanzan al intento válido actual;
+8. `ventana` exige que la fecha del servidor esté dentro de su período.
 
 Un permiso individual queda ligado al intento concreto y no migra si luego cambia el
 intento válido. Docentes y administradores mantienen acceso histórico por `/completo`.
@@ -2370,10 +2387,13 @@ intento válido. Docentes y administradores mantienen acceso histórico por `/co
 | POST | `/api/revisiones/intentos/:idIntento/sesiones` | `alumno` titular |
 | GET | `/api/revisiones/sesiones/:idSesion/contenido` | `alumno` titular |
 
-Modos generales: `nunca`, `al_corregir`, `ventana` y `manual`. El modo `manual` no
-autoriza por sí solo: requiere permiso individual. El acceso puede ser `unico` o
-`libre`. Una política `ventana` exige ambas fechas ISO 8601; los demás modos no las
-admiten. Las escrituras usan revisión optimista.
+Modos generales: `nunca`, `al_corregir`, `ventana` y `manual`. `nunca` es una
+prohibición absoluta: conserva permisos existentes para auditoría, pero los vuelve
+inefectivos y rechaza nuevas concesiones o reactivaciones con `REVIEW_POLICY_NEVER`.
+`manual` no concede acceso general y requiere un permiso individual vigente; el campo
+`Acceso` general se conserva por compatibilidad, pero no interviene en esa decisión. El
+acceso efectivo puede ser `unico` o `libre`. Una política `ventana` exige ambas fechas
+ISO 8601; los demás modos no las admiten. Las escrituras usan revisión optimista.
 
 ```http
 PUT /api/evaluaciones/publicaciones/5/politica-revision
@@ -2421,16 +2441,29 @@ La disponibilidad no expone contenido:
     "modo": "ventana",
     "revisionPolitica": 2,
     "idPermiso": null,
-    "esIntentoValido": true
+    "esIntentoValido": true,
+    "disponibleDesde": "2026-10-20T12:00:00.000Z",
+    "disponibleHasta": "2026-10-20T13:00:00.000Z",
+    "duracionSesionSegundos": 300,
+    "accesoUnicoConsumido": false
   }
 }
 ```
 
+`disponibleDesde` y `disponibleHasta` expresan el permiso efectivo: las fechas de la
+política general `ventana` o las del permiso individual. Son `null` si ese límite no
+existe. Si el acceso único ya fue consumido, la consulta sigue respondiendo `200`, pero
+informa `revisionDisponible: false`, `motivo: "UNIQUE_ACCESS_CONSUMED"` y
+`accesoUnicoConsumido: true`.
+
 La emisión requiere `Idempotency-Key` UUID. Una sesión nueva responde `201`; un replay
 o la reutilización concurrente de la misma sesión única activa responde `200`. La sesión
-expira cinco minutos después de emitirse y conserva snapshots de modo, acceso, revisión
-de política y permiso. Para abrir otra operación después de una expiración conocida, el
-cliente debe usar una clave de idempotencia nueva.
+expira como máximo cinco minutos después de emitirse. Su expiración efectiva es el menor
+valor entre emisión + 300 segundos, `VentanaHasta` de la política general y `FechaHasta`
+del permiso individual. Por eso la ventana de disponibilidad puede ser mayor o menor que
+la duración de una sesión. La sesión conserva snapshots de modo, acceso, revisión,
+permiso y límites efectivos. Para abrir otra operación después de una expiración conocida,
+el cliente debe usar una clave de idempotencia nueva.
 
 ```http
 POST /api/revisiones/intentos/31/sesiones
@@ -2453,20 +2486,155 @@ Idempotency-Key: 74f530c8-b7e3-4287-a2c9-99cba672291f
 
 `GET /api/revisiones/sesiones/:idSesion/contenido` construye la devolución desde
 `IntentoPregunta` y `IntentoPreguntaOpcionSnapshot`, incluyendo selecciones y claves
-correctas sólo dentro de la sesión autorizada. En acceso `unico`, el primer consumo es
-atómico y el segundo devuelve `409 REVIEW_SESSION_CONSUMED`; en acceso `libre`, puede
-consultarse varias veces hasta expirar. Revocación, expiración, emisión, apertura y
-consumo quedan auditados.
+correctas sólo dentro de la sesión autorizada. En acceso `unico`, el primer consumo
+exitoso agota de manera persistente el acceso para ese `IdIntento`, no sólo para la
+sesión: una sesión vencida sin consumo no lo agota, pero una nueva emisión posterior al
+consumo devuelve `409 REVIEW_ACCESS_ALREADY_CONSUMED`. Cambiar temporalmente el acceso
+a `libre` permite nuevas sesiones sin borrar ese consumo histórico; si vuelve a
+`unico`, sigue agotado. En acceso `libre`, pueden emitirse y consumirse nuevas sesiones
+mientras continúe la autorización. Revocación, expiración, emisión, apertura, consumo y
+rechazos operativos relevantes quedan auditados.
 
 Errores estables principales: `REVIEW_NOT_AVAILABLE`, `REVIEW_SESSION_REQUIRED`,
 `REVIEW_SESSION_NOT_FOUND`, `REVIEW_SESSION_CONSUMED`, `REVIEW_SESSION_EXPIRED`,
-`REVIEW_SESSION_REVOKED`, `REVIEW_SCOPE_FORBIDDEN`,
+`REVIEW_SESSION_REVOKED`, `REVIEW_SCOPE_FORBIDDEN`, `REVIEW_POLICY_NEVER`,
+`REVIEW_ACCESS_ALREADY_CONSUMED`,
 `REVIEW_POLICY_REVISION_CONFLICT` y `REVIEW_PERMISSION_REVISION_CONFLICT`.
 
-Requiere aplicar manualmente `migrations/20261018_revision_examen.sql`, idealmente dos
-veces en la base de prueba, y luego ejecutar `scripts/verificar-revision-examen.sql`.
-El backfill asigna `al_corregir + libre` a publicaciones existentes para conservar el
-comportamiento previo bajo una política explícita. No crea ni modifica Stored Procedures.
+Requiere aplicar manualmente `migrations/20261018_revision_examen.sql` y después
+`migrations/20261019_semantica_revision_unica.sql`, idealmente dos veces cada una en la
+base de prueba. Ejecutar luego `scripts/verificar-revision-examen.sql` y
+`scripts/verificar-semantica-revision-unica.sql`. La segunda migración convierte los
+consumos únicos históricos en una garantía persistente por intento y agrega snapshots de
+límites a las sesiones; no modifica notas, respuestas ni Stored Procedures. El backfill
+original asigna `al_corregir + libre` a publicaciones existentes para conservar el
+comportamiento previo bajo una política explícita.
+
+---
+
+### 4.18 Políticas configurables de fullscreen e incidentes — etapa 6
+
+La supervisión separa el evento técnico, la evaluación de reglas, la instrucción al
+cliente y la consecuencia académica. Cada intento congela la política y sus reglas al
+iniciarse; editar la publicación sólo afecta intentos futuros.
+
+| Método | Endpoint | Roles |
+|---|---|---|
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/politica-supervision` | `admin`, `docente` |
+| PUT | `/api/evaluaciones/publicaciones/:idPublicacion/politica-supervision` | `admin`, `docente` |
+| GET | `/api/intentos/:idIntento/supervision` | `admin`, `docente`, `alumno` titular |
+| GET | `/api/intentos/:idIntento/supervision/detalle` | `admin`, `docente` |
+| PUT | `/api/intentos/:idIntento/supervision/override` | `admin`, `docente` |
+
+La configuración predeterminada `temporal-v1` exige pantalla completa y anula el intento
+en la primera pérdida de foco o salida de fullscreen. Una configuración personalizada
+reemplaza las reglas mediante revisión optimista:
+
+```json
+{
+  "PantallaCompletaObligatoria": true,
+  "RevisionEsperada": 1,
+  "Reglas": [
+    {
+      "Codigo": "advertir-foco-2",
+      "TipoEvento": "focus_lost",
+      "Metrica": "cantidad",
+      "Umbral": 2,
+      "VentanaSegundos": 600,
+      "Prioridad": 20,
+      "Accion": "advertir",
+      "Activa": true
+    }
+  ]
+}
+```
+
+Métricas: `cantidad`, `duracion_individual` y `duracion_acumulada`. Los umbrales de
+duración se expresan en milisegundos; `VentanaSegundos` limita el conjunto evaluado. Los
+intervalos acumulados se unen antes de sumar. Sólo se aceptan tipos activos marcados como
+incidentes en `TipoEventoTelemetria`.
+
+Si varias reglas coinciden, primero prevalece la acción más severa y luego la mayor
+prioridad: `anular_intento > bloquear_interfaz > advertir > informar`. El cierre del
+intervalo que originó un bloqueo visual recupera el estado normal. El bloqueo no impide
+guardar respuestas ni elimina información sincronizada.
+
+La escritura individual y por lote agrega únicamente una instrucción operativa, sin
+exponer reglas ni umbrales:
+
+```json
+{
+  "supervision": {
+    "accion": "bloquear_interfaz",
+    "estado": "bloqueado",
+    "interaccionBloqueada": true,
+    "intentoAnulado": false,
+    "decisionId": 81,
+    "replay": false
+  }
+}
+```
+
+`GET /api/intentos/:idIntento/supervision` entrega estado, obligatoriedad de fullscreen
+e instrucción vigente, pero nunca umbrales. `/detalle` devuelve a docente/admin el
+snapshot, decisiones y overrides auditados.
+
+```json
+{
+  "Accion": "desbloquear",
+  "EventoId": null,
+  "Motivo": "Falso positivo verificado",
+  "RevisionEsperada": 2
+}
+```
+
+Los overrides `reconocer` y `descartar` requieren `EventoId`. Ninguno reabre un intento
+anulado. Errores estables: `SUPERVISION_POLICY_NOT_FOUND`,
+`SUPERVISION_POLICY_REVISION_CONFLICT`, `SUPERVISION_RULE_INVALID`,
+`SUPERVISION_SNAPSHOT_MISSING`, `SUPERVISION_SCOPE_FORBIDDEN`,
+`SUPERVISION_REVISION_CONFLICT`, `SUPERVISION_DECISION_NOT_FOUND` y
+`SUPERVISION_CANCELLED_IMMUTABLE`.
+
+Aplicar `migrations/20261019_politicas_supervision.sql` dos veces y luego ejecutar
+`scripts/verificar-politicas-supervision.sql`. La migración modifica
+`SP_Intento_IniciarExamen` para congelar la configuración y amplía la anulación para
+admitir actor `sistema`; no recalifica ni elimina datos históricos.
+
+---
+
+### 4.19 Visibilidad operativa de incidentes — etapa 7
+
+| Método | Endpoint | Roles |
+|---|---|---|
+| GET | `/api/evaluaciones/publicaciones/:idPublicacion/incidentes` | `admin`, `docente` de la comisión |
+| PUT | `/api/telemetria/intentos/:idIntento/incidentes/:eventoId/revision` | `admin`, `docente` de la comisión |
+
+El listado acepta `tipoIncidente`, `severidad`, `estadoRevision`,
+`soloIncidentesSinRevisar`, `pagina` y `limite`. Devuelve `resumen`, `incidentes` y
+`paginacion`; cada elemento incluye `idIntento` y `eventoId` para navegar al intento.
+Los indicadores describen hechos técnicos y su estado operativo: “pendiente” no
+significa fraude.
+
+Un incidente sin revisión persistida se representa como `estadoRevision=pendiente` y
+`revision=0`. Para revisarlo se exige `Idempotency-Key` UUID:
+
+```json
+{
+  "Estado": "revisado",
+  "RevisionEsperada": 0,
+  "Comentario": "Evento verificado por el docente"
+}
+```
+
+Estados: `pendiente`, `revisado` y `descartado`. Cada modificación agrega una fila de
+auditoría; no sobrescribe la anterior. Errores estables:
+`INCIDENT_NOT_FOUND`, `EVENT_NOT_INCIDENT`, `INCIDENT_SCOPE_FORBIDDEN`,
+`INCIDENT_REVISION_CONFLICT`, `IDEMPOTENCY_KEY_REUSED` e
+`IDEMPOTENCY_OPERATION_IN_PROGRESS`.
+
+Aplicar `migrations/20261020_visibilidad_incidentes.sql` dos veces después de la etapa 6
+y ejecutar `scripts/verificar-visibilidad-incidentes.sql`. La migración no modifica
+eventos, decisiones de supervisión, intentos, respuestas ni calificaciones.
 
 ---
 
@@ -3021,7 +3189,7 @@ al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
 Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
 
 Validación local de esta entrega: `npm test -- --runInBand` y
-`npx jest --runInBand --detectOpenHandles`, ambos con 24 suites/479 pruebas. El puerto
+`npx jest --runInBand --detectOpenHandles`, ambos con 26 suites/513 pruebas. El puerto
 55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
 global preexistente (`rootDir` sin `include`, y después la incompatibilidad
 NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server

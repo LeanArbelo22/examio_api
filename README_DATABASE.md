@@ -850,27 +850,98 @@ y corrección. Verificación de sólo lectura: `scripts/verificar-revision-exame
 La migración es idempotente, transaccional, usa SQL dinámico para referencias a objetos
 nuevos y no crea ni modifica Stored Procedures.
 
+Corrección semántica aditiva: `migrations/20261019_semantica_revision_unica.sql`, que
+debe aplicarse después de la anterior. Su verificador de sólo lectura es
+`scripts/verificar-semantica-revision-unica.sql`. No editar ni reemplazar la migración de
+etapa 5 ya aplicada.
+
 - `PoliticaRevisionPublicacion` mantiene una política versionada por publicación:
   `nunca|al_corregir|ventana|manual`, acceso `unico|libre` y fechas sólo para ventana.
 - `PermisoRevisionIntento` mantiene como máximo un override por intento. Su estado
   `activo|revocado`, revisión, fechas y actor permiten autorización individual y
   revocación explícita sin alterar la política general.
 - `SesionRevisionIntento` vincula una sesión UUID con intento y usuario, congela modo,
-  acceso, revisión de política y permiso, y registra emisión, expiración y consumos.
+  acceso, revisión de política, permiso y límites efectivos, y registra emisión,
+  expiración y consumos.
   `UX_SesionRevision_Intento_ActivaUnica` garantiza una sola sesión única activa por
   intento; el consumo se coordina con bloqueo serializable.
+- `ConsumoRevisionUnicaIntento` contiene como máximo una fila por `IdIntento`. Es la
+  garantía autoritativa de que ya ocurrió la única apertura real y no se elimina al
+  cambiar políticas o permisos. La migración toma el primer consumo único histórico
+  como backfill, sin alterar el intento ni sus datos académicos.
 - `AuditoriaRevisionIntento` registra backfill/cambios de política, concesiones,
-  revocaciones, emisión, reutilización, apertura, consumo y expiración.
+  revocaciones, emisión, reutilización, apertura, consumo, expiración y rechazos por
+  política `nunca` o acceso único agotado.
 
 El backfill crea `al_corregir + libre` para toda publicación existente y una auditoría
 única, preservando la visibilidad previa bajo una regla explícita. Las publicaciones
 nuevas crean su política dentro de la misma transacción que `Publicacion`.
 
-La confirmación de corrección es una precondición independiente. La política general
-sólo aplica al intento válido actual; un permiso individual se vincula al intento y no
-migra al cambiar esa selección. Una revocación invalida las sesiones emitidas del
-intento. El contenido del alumno se reconstruye desde snapshots y no usa el endpoint
+La confirmación de corrección es una precondición independiente. `nunca` prevalece sobre
+cualquier permiso; `manual` sólo autoriza mediante permiso individual vigente. La
+política general `al_corregir|ventana` sólo aplica al intento válido actual; un permiso
+individual se vincula al intento y no migra al cambiar esa selección. Una revocación
+invalida las sesiones emitidas del intento.
+
+`FechaExpiracion` se calcula como el mínimo entre emisión + 300 segundos, el final de la
+ventana general aplicable y el final del permiso individual aplicable. Los finales son
+exclusivos. Vencer una sesión única sin consumirla no crea una fila de consumo y permite
+emitir otra. El contenido del alumno se reconstruye desde snapshots y no usa el endpoint
 docente `/intentos/:id/completo`.
+
+### 9.10 Políticas configurables de supervisión — etapa 6
+
+DDL: `migrations/20261019_politicas_supervision.sql`, posterior a la telemetría temporal
+y a la anulación autoritativa. Verificación de sólo lectura:
+`scripts/verificar-politicas-supervision.sql`. La migración es idempotente y usa SQL
+dinámico para las referencias a objetos creados dentro del mismo batch.
+
+- `PoliticaSupervisionPublicacion` y `ReglaSupervisionPublicacion` contienen la
+  configuración editable y versionada de la publicación.
+- `IntentoPoliticaSupervision` e `IntentoReglaSupervision` son snapshots inmutables. La
+  FK hacia la regla de origen usa `ON DELETE SET NULL`, por lo que reemplazar reglas no
+  invalida intentos existentes.
+- `EstadoSupervisionIntento` mantiene el estado operativo y revisión optimista.
+- `DecisionSupervisionIntento` tiene unicidad `(IdIntento,EventoId)` y conserva regla,
+  valor calculado, acción y resultado de la consecuencia.
+- `OverrideSupervisionIntento` audita desbloqueo, reconocimiento o descarte con actor,
+  motivo y transición de revisión.
+
+La severidad es autoritativa y prevalece sobre el campo de prioridad:
+`anular_intento > bloquear_interfaz > advertir > informar`. `Prioridad` desempata reglas
+de igual severidad. La duración acumulada une intervalos completados solapados; los
+intervalos abiertos aportan cantidad pero no duración.
+
+`SP_Intento_IniciarExamen` crea los snapshots dentro de la transacción del intento y
+completa cualquier snapshot faltante al reanudar un intento en progreso. El backfill
+asigna `temporal-v1` a publicaciones existentes y congela la mejor configuración
+disponible para intentos preexistentes, sin alterar notas ni respuestas.
+
+`AnulacionIntentoIncidente` admite `ActorTipo=usuario|sistema`; `AnuladoPor` es nullable
+únicamente para el actor sistema. Se conservan la FK al evento y la unicidad por intento.
+La consecuencia configurada reutiliza el servicio de anulación de la etapa previa.
+
+### 9.11 Revisión operativa de incidentes — etapa 7
+
+DDL: `migrations/20261020_visibilidad_incidentes.sql`, posterior a la política de
+supervisión. Verificación de sólo lectura:
+`scripts/verificar-visibilidad-incidentes.sql`.
+
+`RevisionIncidenteIntento` conserva un historial append-only por
+`IncidenteIntento.Id`. La unicidad `(IdIncidente,Revision)` y la transacción serializable
+permiten revisión optimista segura. La fila de mayor revisión es el estado efectivo;
+si no existe ninguna, el contrato deriva `pendiente` con revisión `0` sin alterar datos
+históricos. Cada fila conserva estado, actor, rol, comentario y fecha UTC.
+
+Sólo se listan eventos cuyo catálogo tenga `EsIncidente=1`. La severidad procede de
+`DecisionSupervisionIntento.Accion`; cuando no existe una decisión queda
+`sin_clasificar`. Revisión y descarte son clasificaciones operativas: no modifican la
+decisión, el estado académico ni la nota. La idempotencia reutiliza
+`OperacionIdempotente` y no agrega otra fuente de claves.
+
+Los índices permiten obtener la última revisión por incidente. Los reportes parten de
+la publicación y agregan eventos por conjuntos; no crean tablas precalculadas ni hacen
+consultas N+1.
 
 ## 10. Modelo de selección múltiple y justificación
 

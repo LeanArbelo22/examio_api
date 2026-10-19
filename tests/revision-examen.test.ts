@@ -34,6 +34,7 @@ const scope = (overrides: Record<string, unknown> = {}) => ({
   AccesoPermiso: null,
   PermisoDesde: null,
   PermisoHasta: null,
+  IdConsumoUnico: null,
   FechaServidor: now,
   ...overrides,
 });
@@ -140,6 +141,27 @@ describe('precedencia de disponibilidad', () => {
     expect(evaluar({ EstadoPermiso: 'revocado' }).Motivo).toBe('INDIVIDUAL_PERMISSION_REVOKED');
   });
 
+  it('nunca deniega incluso con permiso individual activo', () => {
+    expect(evaluar({
+      Modo: 'nunca', IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'libre',
+    })).toMatchObject({ RevisionDisponible: false, Motivo: 'POLICY_NEVER' });
+  });
+
+  it('manual deniega sin permiso y autoriza solamente con permiso vigente', () => {
+    expect(evaluar({ Modo: 'manual' })).toMatchObject({
+      RevisionDisponible: false, Motivo: 'POLICY_MANUAL',
+    });
+    expect(evaluar({
+      Modo: 'manual', IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'unico',
+      PermisoDesde: new Date('2026-10-18T11:00:00Z'),
+      PermisoHasta: new Date('2026-10-18T13:00:00Z'),
+    })).toMatchObject({
+      RevisionDisponible: true, Origen: 'individual', Acceso: 'unico',
+      DisponibleDesde: new Date('2026-10-18T11:00:00Z'),
+      DisponibleHasta: new Date('2026-10-18T13:00:00Z'),
+    });
+  });
+
   it('un permiso activo habilita un intento aunque ya no sea el válido', () => {
     const result = evaluar({
       IdIntentoValido: 8, IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'unico',
@@ -173,6 +195,19 @@ describe('precedencia de disponibilidad', () => {
     });
   });
 
+  it('el consumo único persiste al pasar por libre y volver a único', () => {
+    expect(evaluar({ AccesoPolitica: 'unico', IdConsumoUnico: 7 })).toMatchObject({
+      RevisionDisponible: false, Motivo: 'UNIQUE_ACCESS_CONSUMED',
+      Acceso: 'unico', AccesoUnicoConsumido: true,
+    });
+    expect(evaluar({ AccesoPolitica: 'libre', IdConsumoUnico: 7 })).toMatchObject({
+      RevisionDisponible: true, Acceso: 'libre', AccesoUnicoConsumido: true,
+    });
+    expect(evaluar({ AccesoPolitica: 'unico', IdConsumoUnico: 7 })).toMatchObject({
+      RevisionDisponible: false, Motivo: 'UNIQUE_ACCESS_CONSUMED',
+    });
+  });
+
   it('expone la evaluación de disponibilidad al alumno titular', async () => {
     dbRequest.query.mockResolvedValueOnce({ recordset: [scope()] });
     const res = await request(app)
@@ -181,6 +216,27 @@ describe('precedencia de disponibilidad', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({
       revisionDisponible: true, motivo: 'POLICY_ALLOWED', acceso: 'libre', esIntentoValido: true,
+      disponibleDesde: null, disponibleHasta: null, duracionSesionSegundos: 300,
+      accesoUnicoConsumido: false,
+    });
+  });
+
+  it('informa que el acceso único del intento ya fue consumido', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [scope({
+      AccesoPolitica: 'unico', IdConsumoUnico: 7,
+    })] });
+    const res = await request(app)
+      .get('/api/intentos/7/revision-disponible')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({
+      revisionDisponible: false,
+      motivo: 'UNIQUE_ACCESS_CONSUMED',
+      acceso: 'unico',
+      origen: 'general',
+      duracionSesionSegundos: 300,
+      accesoUnicoConsumido: true,
     });
   });
 });
@@ -190,6 +246,7 @@ describe('permisos individuales y auditoría', () => {
     mock.transactionRequest.query
       .mockResolvedValueOnce({ recordset: [{ IdPublicacion: 5 }] })
       .mockResolvedValueOnce({ recordset: [{ Id: 5, IdDocente: 10, DocenteActivo: true }] })
+      .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [{
         Id: 3, IdIntento: 7, Estado: 'activo', Acceso: 'unico', Revision: 1,
@@ -204,6 +261,27 @@ describe('permisos individuales y auditoría', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ idIntento: 7, estado: 'activo', acceso: 'unico', revision: 1 });
     expect(mock.transactionRequest.input).toHaveBeenCalledWith('Accion', 'NVARCHAR', 'permiso_otorgado');
+  });
+
+  it('rechaza otorgar o reactivar permisos cuando la política es nunca', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IdPublicacion: 5 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 5, IdDocente: 10, DocenteActivo: true }] })
+      .mockResolvedValueOnce({ recordset: [{ Modo: 'nunca' }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .put('/api/intentos/7/permiso-revision')
+      .set('Authorization', `Bearer ${docenteToken}`)
+      .send({ Acceso: 'unico', RevisionEsperada: 0 });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('REVIEW_POLICY_NEVER');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith(
+      'Accion', 'NVARCHAR', 'permiso_denegado_nunca',
+    );
+    expect(mock.transactionRequest.query.mock.calls.some(call =>
+      call[0].includes('INSERT INTO dbo.PermisoRevisionIntento'))).toBe(false);
   });
 
   it('revoca incluso sin concesión previa e invalida sesiones activas', async () => {
@@ -272,8 +350,13 @@ describe('sesiones de revisión', () => {
     expect(res.status).toBe(201);
     expect(res.body.data).toMatchObject({ idIntento: 7, acceso: 'unico', reutilizada: false });
     const insert = mock.transactionRequest.query.mock.calls[4][0];
-    expect(insert).toContain('DATEADD(MINUTE,5,SYSUTCDATETIME())');
+    expect(insert).toContain('CAST(@Expiracion AS datetime2(3))');
+    expect(insert).toContain('DisponibleHastaSnapshot');
     expect(insert).toContain('RevisionPoliticaSnapshot');
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith(
+      'Expiracion', 'NVARCHAR', '2026-10-18T12:05:00.000Z',
+    );
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('LimitadaPor', 'NVARCHAR', 'duracion');
   });
 
   it('reutiliza la sesión única activa ante otra emisión concurrente', async () => {
@@ -298,15 +381,228 @@ describe('sesiones de revisión', () => {
     expect(mock.transactionRequest.query.mock.calls.some(call => call[0].includes('INSERT INTO dbo.SesionRevisionIntento\n'))).toBe(false);
   });
 
+  it.each([
+    ['política nunca', scope({ Modo: 'nunca', IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'libre' }),
+      'REVIEW_POLICY_NEVER', 'emision_denegada_nunca'],
+    ['acceso único consumido', scope({ AccesoPolitica: 'unico', IdConsumoUnico: 7 }),
+      'REVIEW_ACCESS_ALREADY_CONSUMED', 'emision_denegada_unico'],
+  ])('rechaza la emisión por %s y deja una sola auditoría', async (_name, scopeRow, code, accion) => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeRow] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 42 }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe(code);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Accion', 'NVARCHAR', accion);
+    expect(mock.transactionRequest.query.mock.calls.some(call =>
+      call[0].includes('INSERT INTO dbo.SesionRevisionIntento\n'))).toBe(false);
+  });
+
+  it('reproduce un rechazo idempotente sin duplicar su auditoría', async () => {
+    const { requestHash } = require('../src/services/idempotency.service');
+    const error = {
+      status: 409,
+      message: 'El acceso único de este intento ya fue consumido',
+      code: 'REVIEW_ACCESS_ALREADY_CONSUMED',
+    };
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope({ AccesoPolitica: 'unico', IdConsumoUnico: 7 })] })
+      .mockResolvedValueOnce({ recordset: [{
+        Id: 42,
+        RequestHash: requestHash({ idIntento: 7 }),
+        Estado: 'completada',
+        ResultadoJson: JSON.stringify({ error }),
+        StatusHttp: 409,
+      }] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('REVIEW_ACCESS_ALREADY_CONSUMED');
+    expect(mock.transactionRequest.input).not.toHaveBeenCalledWith(
+      'Accion', 'NVARCHAR', 'emision_denegada_unico',
+    );
+  });
+
+  it.each([
+    ['2026-10-18T12:03:00.000Z', '2026-10-18T12:03:00.000Z'],
+    ['2026-10-18T12:01:00.000Z', '2026-10-18T12:01:00.000Z'],
+  ])('limita la sesión al final de una ventana (%s)', async (ventanaHasta, expected) => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope({
+        Modo: 'ventana', AccesoPolitica: 'libre',
+        VentanaDesde: new Date('2026-10-18T11:00:00.000Z'),
+        VentanaHasta: new Date(ventanaHasta),
+      })] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 43 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdSesion: sessionId, IdIntento: 7, Acceso: 'libre',
+        FechaEmision: now, FechaExpiracion: new Date(expected),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(201);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('Expiracion', 'NVARCHAR', expected);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('LimitadaPor', 'NVARCHAR', 'ventana');
+  });
+
+  it('limita la sesión al final del permiso individual', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope({
+        Modo: 'manual', IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'libre',
+        PermisoDesde: new Date('2026-10-18T11:00:00.000Z'),
+        PermisoHasta: new Date('2026-10-18T12:02:00.000Z'),
+      })] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 44 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdSesion: sessionId, IdIntento: 7, Acceso: 'libre',
+        FechaEmision: now, FechaExpiracion: new Date('2026-10-18T12:02:00.000Z'),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(201);
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith(
+      'Expiracion', 'NVARCHAR', '2026-10-18T12:02:00.000Z',
+    );
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith('LimitadaPor', 'NVARCHAR', 'permiso');
+  });
+
+  it.each([
+    ['ventana vencida', scope({
+      Modo: 'ventana', VentanaDesde: new Date('2026-10-18T10:00:00Z'),
+      VentanaHasta: new Date('2026-10-18T12:00:00Z'),
+    })],
+    ['permiso vencido en política manual', scope({
+      Modo: 'manual', IdPermiso: 4, EstadoPermiso: 'activo', AccesoPermiso: 'libre',
+      PermisoHasta: new Date('2026-10-18T12:00:00Z'),
+    })],
+  ])('no emite cuando la %s', async (_name, scopeRow) => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scopeRow] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 45 }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('REVIEW_NOT_AVAILABLE');
+    expect(mock.transactionRequest.query.mock.calls.some(call =>
+      call[0].includes('INSERT INTO dbo.SesionRevisionIntento\n'))).toBe(false);
+  });
+
+  it('una sesión única vencida sin consumir no agota el intento', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope({ AccesoPolitica: 'unico' })] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 46 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        Id: '20000000-0000-4000-8000-000000000499', IdIntento: 7,
+        AccesoSnapshot: 'unico', FechaEmision: new Date('2026-10-18T11:50:00Z'),
+        FechaExpiracion: new Date('2026-10-18T11:55:00Z'),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdSesion: sessionId, IdIntento: 7, Acceso: 'unico',
+        FechaEmision: now, FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const res = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toMatchObject({ reutilizada: false, acceso: 'unico' });
+    expect(mock.transactionRequest.input).toHaveBeenCalledWith(
+      'Accion', 'NVARCHAR', 'sesion_expirada',
+    );
+  });
+
+  it('el acceso libre permite emitir sesiones nuevas mientras siga autorizado', async () => {
+    const secondKey = '10000000-0000-4000-8000-000000000502';
+    const secondSessionId = '20000000-0000-4000-8000-000000000502';
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [scope()] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 47 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdSesion: sessionId, IdIntento: 7, Acceso: 'libre',
+        FechaEmision: now, FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [scope()] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 48 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        IdSesion: secondSessionId, IdIntento: 7, Acceso: 'libre',
+        FechaEmision: now, FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
+      }] })
+      .mockResolvedValueOnce({ recordset: [] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    const first = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', uuid);
+    const second = await request(app)
+      .post('/api/revisiones/intentos/7/sesiones')
+      .set('Authorization', `Bearer ${alumnoToken}`)
+      .set('Idempotency-Key', secondKey);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.data.idSesion).toBe(sessionId);
+    expect(second.body.data.idSesion).toBe(secondSessionId);
+    expect(mock.transactionRequest.query.mock.calls.filter(call =>
+      call[0].includes('INSERT INTO dbo.SesionRevisionIntento\n'))).toHaveLength(2);
+  });
+
   it('consume una sesión única y devuelve contenido construido desde snapshots', async () => {
     mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 7 }] })
       .mockResolvedValueOnce({ recordset: [{
         Id: sessionId, IdIntento: 7, IdUsuario: 20, IdAlumno: 2, IdPublicacion: 5,
         CorreccionConfirmada: true, FechaServidor: now,
         FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
         AccesoSnapshot: 'unico', Estado: 'emitida', EstadoPermisoActual: null, CantidadConsumos: 0,
       }] })
+      .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [{ Id: sessionId }] })
+      .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [{
@@ -334,16 +630,44 @@ describe('sesiones de revisión', () => {
       { idOpcion: 100, texto: 'Correcta', esCorrecta: true, fueSeleccionada: true },
       { idOpcion: 101, texto: 'Distractor', esCorrecta: false, fueSeleccionada: false },
     ]);
-    expect(mock.transactionRequest.query.mock.calls[5][0]).toContain('IntentoPreguntaOpcionSnapshot');
+    expect(mock.transactionRequest.query.mock.calls[5][0]).toContain(
+      'INSERT INTO dbo.ConsumoRevisionUnicaIntento',
+    );
+    expect(mock.transactionRequest.query.mock.calls[9][0]).toContain('IntentoPreguntaOpcionSnapshot');
+  });
+
+  it('impide un doble consumo concurrente aunque la sesión todavía figure emitida', async () => {
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        Id: sessionId, IdIntento: 7, IdUsuario: 20, IdAlumno: 2, IdPublicacion: 5,
+        CorreccionConfirmada: true, FechaServidor: now,
+        FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
+        AccesoSnapshot: 'unico', Estado: 'emitida', EstadoPermisoActual: null, CantidadConsumos: 0,
+      }] })
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 7 }] });
+
+    const res = await request(app)
+      .get(`/api/revisiones/sesiones/${sessionId}/contenido`)
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('REVIEW_SESSION_CONSUMED');
+    expect(mock.transactionRequest.query.mock.calls.some(call =>
+      call[0].includes('SET Estado=\'consumida\''))).toBe(false);
   });
 
   it('rechaza un segundo consumo de acceso único', async () => {
-    mock.transactionRequest.query.mockResolvedValueOnce({ recordset: [{
-      Id: sessionId, IdIntento: 7, IdUsuario: 20, IdAlumno: 2, IdPublicacion: 5,
-      CorreccionConfirmada: true, FechaServidor: now,
-      FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
-      AccesoSnapshot: 'unico', Estado: 'consumida', EstadoPermisoActual: null, CantidadConsumos: 1,
-    }] });
+    mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{
+        Id: sessionId, IdIntento: 7, IdUsuario: 20, IdAlumno: 2, IdPublicacion: 5,
+        CorreccionConfirmada: true, FechaServidor: now,
+        FechaExpiracion: new Date('2026-10-18T12:05:00Z'),
+        AccesoSnapshot: 'unico', Estado: 'consumida', EstadoPermisoActual: null, CantidadConsumos: 1,
+      }] });
 
     const res = await request(app)
       .get(`/api/revisiones/sesiones/${sessionId}/contenido`)
@@ -354,6 +678,8 @@ describe('sesiones de revisión', () => {
 
   it('persiste la expiración antes de devolver el conflicto', async () => {
     mock.transactionRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IdIntento: 7 }] })
+      .mockResolvedValueOnce({ recordset: [{ Id: 7 }] })
       .mockResolvedValueOnce({ recordset: [{
         Id: sessionId, IdIntento: 7, IdUsuario: 20, IdAlumno: 2, IdPublicacion: 5,
         CorreccionConfirmada: true, FechaServidor: now,
@@ -368,7 +694,7 @@ describe('sesiones de revisión', () => {
       .set('Authorization', `Bearer ${alumnoToken}`);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('REVIEW_SESSION_EXPIRED');
-    expect(mock.transactionRequest.query.mock.calls[1][0]).toContain("Estado='expirada'");
+    expect(mock.transactionRequest.query.mock.calls[3][0]).toContain("Estado='expirada'");
   });
 
   it('exige Idempotency-Key y limita sesiones a alumnos', async () => {

@@ -250,6 +250,7 @@ describe('Etapa 3 - telemetría temporal confiable', () => {
       .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [{ InicioAnterior: null, InicioSiguiente: null }] })
       .mockResolvedValueOnce({ recordset: [persistido()] })
+      .mockResolvedValueOnce({ recordset: [] })
       .mockResolvedValueOnce({ recordset: [alcance()] })
       .mockResolvedValueOnce({ recordset: [tipoIntervalo()] })
       .mockResolvedValueOnce({ recordset: [persistido({ EventoId: eventoId, SecuenciaCliente: 2 })] });

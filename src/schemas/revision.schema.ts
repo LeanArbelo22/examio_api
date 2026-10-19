@@ -44,9 +44,10 @@ export const AuditoriaRevisionQuerySchema = z.object({
   idIntento: z.coerce.number().int().positive().optional(),
   accion: z.enum([
     'politica_backfill', 'politica_actualizada',
-    'permiso_otorgado', 'permiso_reactivado', 'permiso_revocado',
+    'permiso_otorgado', 'permiso_reactivado', 'permiso_revocado', 'permiso_denegado_nunca',
     'sesion_emitida', 'sesion_reutilizada', 'sesion_abierta',
     'sesion_consumida', 'sesion_expirada', 'sesion_revocada', 'contenido_consultado',
+    'emision_denegada_unico', 'emision_denegada_nunca',
   ]).optional(),
   pagina: z.coerce.number().int().positive().max(1000000).default(1),
   limite: z.coerce.number().int().min(1).max(100).default(50),

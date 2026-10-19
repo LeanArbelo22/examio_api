@@ -1,6 +1,7 @@
 import * as sql from 'mssql';
 import { pool } from '../config/db';
 import { IncidenteFocoInput } from '../schemas/telemetria.schema';
+import { evaluarEventoSupervision } from './supervision.service';
 import { ActorBanco, BancoError, DbBanco } from './banco-common.service';
 
 type ActorTelemetria = ActorBanco & { idAlumno?: number | null };
@@ -138,7 +139,10 @@ export async function guardarIncidenteFoco(
 
   if (existente) {
     validarCoincidencia(existente, input);
-    if (existente.Estado === 'completado' || input.FechaFinCliente === undefined) return existente;
+    if (existente.Estado === 'completado' || input.FechaFinCliente === undefined) {
+      const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'replay');
+      return { ...existente, Supervision: supervision };
+    }
     validarVentanaTemporal(alcance, {
       ...input,
       FechaInicioCliente: input.FechaInicioCliente ?? new Date(existente.FechaInicioCliente).toISOString(),
@@ -150,7 +154,8 @@ export async function guardarIncidenteFoco(
       .query(`UPDATE dbo.IncidenteIntento SET FechaFinCliente=@FechaFinCliente,
         DuracionMilisegundos=@DuracionMilisegundos,FechaRecepcionFin=SYSUTCDATETIME(),Estado='completado'
         OUTPUT inserted.* WHERE Id=@Id`);
-    return actualizado.recordset[0];
+    const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'actualizado');
+    return { ...actualizado.recordset[0], Supervision: supervision };
   }
 
   if (!input.FechaInicioCliente) {
@@ -171,7 +176,8 @@ export async function guardarIncidenteFoco(
       OUTPUT inserted.*
       VALUES(@EventoId,@IdIntento,@Tipo,@FechaInicioCliente,@FechaFinCliente,@DuracionMilisegundos,
         CASE WHEN @Estado='completado' THEN SYSUTCDATETIME() ELSE NULL END,@Estado)`);
-  return creado.recordset[0];
+  const supervision = await evaluarEventoSupervision(db, idIntento, eventoId, 'creado');
+  return { ...creado.recordset[0], Supervision: supervision };
 }
 
 async function autorizarConsulta(poolDb: DbBanco, actor: ActorTelemetria, idIntento: number) {

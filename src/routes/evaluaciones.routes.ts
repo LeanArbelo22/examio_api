@@ -24,6 +24,8 @@ import {
   getPoliticaRevision,
   putPoliticaRevision,
 } from '../controllers/revision.controller';
+import { getPoliticaSupervision, putPoliticaSupervision } from '../controllers/supervision.controller';
+import { getIncidentesPublicacion } from '../controllers/incidentes.controller';
 
 const router = Router();
 router.post('/:id/importar-banco', checkRole(['docente']), validateRequest(ImportarBancoSchema), importarBanco);
@@ -43,6 +45,9 @@ router.get('/publicaciones/:idPublicacion/politica-revision', checkRole(['admin'
 router.put('/publicaciones/:idPublicacion/politica-revision', checkRole(['admin', 'docente']), putPoliticaRevision);
 router.get('/publicaciones/:idPublicacion/permisos-revision', checkRole(['admin', 'docente']), getPermisosRevision);
 router.get('/publicaciones/:idPublicacion/auditoria-revision', checkRole(['admin', 'docente']), getAuditoriaRevision);
+router.get('/publicaciones/:idPublicacion/politica-supervision', checkRole(['admin', 'docente']), getPoliticaSupervision);
+router.put('/publicaciones/:idPublicacion/politica-supervision', checkRole(['admin', 'docente']), putPoliticaSupervision);
+router.get('/publicaciones/:idPublicacion/incidentes', checkRole(['admin', 'docente']), getIncidentesPublicacion);
 router.get('/:id/detalle', checkRole(['admin', 'docente']), getDetallePublicacion);
 router.get('/:id/alumnos', checkRole(['admin', 'docente']), getAlumnosByPublicacion);
 

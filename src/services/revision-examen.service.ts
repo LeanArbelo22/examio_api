@@ -28,6 +28,7 @@ type ScopeRevision = Record<string, any> & {
   AccesoPermiso: 'unico' | 'libre' | null;
   PermisoDesde: Date | string | null;
   PermisoHasta: Date | string | null;
+  IdConsumoUnico: number | null;
   FechaServidor: Date | string;
 };
 
@@ -42,7 +43,15 @@ type DisponibilidadRevision = {
   RevisionPolitica: number;
   IdPermiso: number | null;
   EsIntentoValido: boolean;
+  DisponibleDesde: Date | string | null;
+  DisponibleHasta: Date | string | null;
+  DuracionSesionSegundos: number;
+  AccesoUnicoConsumido: boolean;
 };
+
+type ErrorRevision = { status: number; message: string; code: string };
+
+const DURACION_SESION_SEGUNDOS = 300;
 
 const instant = (value: Date | string | null | undefined) => value ? new Date(value).getTime() : null;
 const mismoInstante = (left: Date | string | null | undefined, right: Date | string | null | undefined) =>
@@ -83,6 +92,7 @@ async function obtenerScopeRevision(db: DbBanco, idIntento: number, bloquear = f
       PR.VentanaDesde,PR.VentanaHasta,COALESCE(PR.Revision,0) AS RevisionPolitica,
       PE.Id AS IdPermiso,PE.Estado AS EstadoPermiso,PE.Acceso AS AccesoPermiso,
       PE.FechaDesde AS PermisoDesde,PE.FechaHasta AS PermisoHasta,
+      CU.IdIntento AS IdConsumoUnico,
       SYSUTCDATETIME() AS FechaServidor
     FROM dbo.Intento I ${lock}
     LEFT JOIN dbo.IntentoValidoOverride IVO
@@ -96,6 +106,7 @@ async function obtenerScopeRevision(db: DbBanco, idIntento: number, bloquear = f
     ) IA
     LEFT JOIN dbo.PoliticaRevisionPublicacion PR ON PR.IdPublicacion=I.IdPublicacion
     LEFT JOIN dbo.PermisoRevisionIntento PE ON PE.IdIntento=I.Id
+    LEFT JOIN dbo.ConsumoRevisionUnicaIntento CU ON CU.IdIntento=I.Id
     WHERE I.Id=@Intento`, { Intento: idIntento });
   const row = result.recordset[0] as ScopeRevision | undefined;
   if (!row) throw new BancoError(404, 'Intento no encontrado', 'ATTEMPT_NOT_FOUND');
@@ -111,39 +122,71 @@ export function evaluarScopeRevision(scope: ScopeRevision): DisponibilidadRevisi
     RevisionPolitica: Number(scope.RevisionPolitica),
     IdPermiso: scope.IdPermiso == null ? null : Number(scope.IdPermiso),
     EsIntentoValido: Number(scope.IdIntentoValido) === Number(scope.IdIntento),
+    DuracionSesionSegundos: DURACION_SESION_SEGUNDOS,
+    AccesoUnicoConsumido: scope.IdConsumoUnico != null,
   };
   const denied = (Motivo: string): DisponibilidadRevision => ({
     ...base, RevisionDisponible: false, Motivo, Acceso: null, Origen: null,
+    DisponibleDesde: null, DisponibleHasta: null,
   });
+  const allowed = (
+    Motivo: string,
+    Acceso: 'unico' | 'libre',
+    Origen: 'individual' | 'general',
+    DisponibleDesde: Date | string | null,
+    DisponibleHasta: Date | string | null,
+  ): DisponibilidadRevision => {
+    const result = {
+      ...base, RevisionDisponible: true, Motivo, Acceso, Origen,
+      DisponibleDesde, DisponibleHasta,
+    };
+    if (Acceso === 'unico' && base.AccesoUnicoConsumido) {
+      return { ...result, RevisionDisponible: false, Motivo: 'UNIQUE_ACCESS_CONSUMED' };
+    }
+    return result;
+  };
 
   if (scope.EstadoIntento !== 'entregado') return denied('ATTEMPT_NOT_DELIVERED');
   if (!Boolean(scope.CorreccionConfirmada)) return denied('CORRECTION_NOT_CONFIRMED');
+  if (scope.Modo === 'nunca') return denied('POLICY_NEVER');
   if (scope.EstadoPermiso === 'revocado') return denied('INDIVIDUAL_PERMISSION_REVOKED');
 
   const permisoActivo = scope.EstadoPermiso === 'activo'
     && (instant(scope.PermisoDesde) === null || instant(scope.PermisoDesde)! <= now)
-    && (instant(scope.PermisoHasta) === null || instant(scope.PermisoHasta)! >= now);
-  if (permisoActivo) return {
-    ...base,
-    RevisionDisponible: true,
-    Motivo: 'INDIVIDUAL_PERMISSION_ACTIVE',
-    Acceso: scope.AccesoPermiso ?? 'libre',
-    Origen: 'individual',
-  };
+    && (instant(scope.PermisoHasta) === null || now < instant(scope.PermisoHasta)!);
+  if (permisoActivo) return allowed(
+    'INDIVIDUAL_PERMISSION_ACTIVE', scope.AccesoPermiso ?? 'libre', 'individual',
+    scope.PermisoDesde, scope.PermisoHasta,
+  );
 
-  if (!base.EsIntentoValido) return denied('NOT_CURRENT_VALID_ATTEMPT');
-  if (scope.Modo === 'nunca') return denied('POLICY_NEVER');
   if (scope.Modo === 'manual') return denied('POLICY_MANUAL');
+  if (!base.EsIntentoValido) return denied('NOT_CURRENT_VALID_ATTEMPT');
   if (scope.Modo === 'ventana') {
     if (instant(scope.VentanaDesde)! > now) return denied('POLICY_WINDOW_NOT_STARTED');
-    if (instant(scope.VentanaHasta)! < now) return denied('POLICY_WINDOW_EXPIRED');
+    if (instant(scope.VentanaHasta)! <= now) return denied('POLICY_WINDOW_EXPIRED');
+    return allowed(
+      'POLICY_ALLOWED', scope.AccesoPolitica, 'general',
+      scope.VentanaDesde, scope.VentanaHasta,
+    );
   }
+  return allowed('POLICY_ALLOWED', scope.AccesoPolitica, 'general', null, null);
+}
+
+function errorDisponibilidad(disponibilidad: DisponibilidadRevision): ErrorRevision {
+  if (disponibilidad.Motivo === 'POLICY_NEVER') return {
+    status: 409,
+    message: 'La política de la publicación no permite revisiones',
+    code: 'REVIEW_POLICY_NEVER',
+  };
+  if (disponibilidad.Motivo === 'UNIQUE_ACCESS_CONSUMED') return {
+    status: 409,
+    message: 'El acceso único de este intento ya fue consumido',
+    code: 'REVIEW_ACCESS_ALREADY_CONSUMED',
+  };
   return {
-    ...base,
-    RevisionDisponible: true,
-    Motivo: 'POLICY_ALLOWED',
-    Acceso: scope.AccesoPolitica,
-    Origen: 'general',
+    status: 409,
+    message: 'La revisión del intento no está disponible',
+    code: 'REVIEW_NOT_AVAILABLE',
   };
 }
 
@@ -217,8 +260,21 @@ export async function actualizarPoliticaRevision(
 
 export async function otorgarPermisoRevision(actor: ActorBanco, idIntento: number, input: PermisoRevisionInput) {
   if (!actor.id) throw new BancoError(403, 'No se pudo identificar al usuario', 'FORBIDDEN');
-  return atomico(async tx => {
+  const outcome = await atomico(async tx => {
     const idPublicacion = await autorizarIntentoGestion(tx, actor, idIntento);
+    const politica = (await consultar(tx, `SELECT COALESCE(Modo,'al_corregir') AS Modo
+      FROM dbo.PoliticaRevisionPublicacion WITH (UPDLOCK,HOLDLOCK)
+      WHERE IdPublicacion=@Publicacion`, { Publicacion: idPublicacion })).recordset[0];
+    if (politica?.Modo === 'nunca') {
+      const error: ErrorRevision = {
+        status: 409,
+        message: 'La política de la publicación no permite permisos de revisión',
+        code: 'REVIEW_POLICY_NEVER',
+      };
+      await auditar(tx, { publicacion: idPublicacion, intento: idIntento, actor,
+        accion: 'permiso_denegado_nunca', detalle: { revisionEsperada: input.RevisionEsperada } });
+      return { error };
+    }
     const actual = (await consultar(tx, `SELECT * FROM dbo.PermisoRevisionIntento WITH (UPDLOCK,HOLDLOCK)
       WHERE IdIntento=@Intento`, { Intento: idIntento })).recordset[0];
     const desde = input.FechaDesde ?? null;
@@ -227,7 +283,7 @@ export async function otorgarPermisoRevision(actor: ActorBanco, idIntento: numbe
       && mismoInstante(actual.FechaDesde, desde) && mismoInstante(actual.FechaHasta, hasta)
       && (actual.Motivo ?? null) === (input.Motivo ?? null);
     if (actual && Number(actual.Revision) !== input.RevisionEsperada) {
-      if (coincide) return { ...actual, Replay: true };
+      if (coincide) return { data: { ...actual, Replay: true } };
       throw new BancoError(409, 'El permiso cambió; recargar antes de continuar', 'REVIEW_PERMISSION_REVISION_CONFLICT');
     }
     if (!actual && input.RevisionEsperada !== 0) {
@@ -254,8 +310,12 @@ export async function otorgarPermisoRevision(actor: ActorBanco, idIntento: numbe
       accion: actual?.Estado === 'revocado' ? 'permiso_reactivado' : 'permiso_otorgado',
       detalle: { acceso: updated.Acceso, revision: updated.Revision,
         fechaDesde: updated.FechaDesde, fechaHasta: updated.FechaHasta } });
-    return { ...updated, Replay: false };
+    return { data: { ...updated, Replay: false } };
   });
+  if ('error' in outcome && outcome.error) {
+    throw new BancoError(outcome.error.status, outcome.error.message, outcome.error.code);
+  }
+  return outcome.data;
 }
 
 export async function revocarPermisoRevision(actor: ActorBanco, idIntento: number) {
@@ -382,11 +442,23 @@ export async function emitirSesionRevision(actor: ActorBanco, idIntento: number,
     const scope = await obtenerScopeRevision(tx, idIntento, true);
     await autorizarConsultaDisponibilidad(tx, actor, scope);
     const idem = await iniciarIdempotencia(tx, actor, `revision.${idIntento}.sesion`, key, { idIntento });
-    if (idem.replay) return { data: idem.result, status: idem.status };
+    if (idem.replay) {
+      const replay = idem.result as { error?: ErrorRevision } | null;
+      if (replay?.error) return { error: replay.error };
+      return { data: idem.result, status: idem.status };
+    }
 
     const disponibilidad = evaluarScopeRevision(scope);
     if (!disponibilidad.RevisionDisponible || !disponibilidad.Acceso) {
-      throw new BancoError(409, 'La revisión del intento no está disponible', 'REVIEW_NOT_AVAILABLE');
+      const error = errorDisponibilidad(disponibilidad);
+      if (error.code === 'REVIEW_POLICY_NEVER' || error.code === 'REVIEW_ACCESS_ALREADY_CONSUMED') {
+        await auditar(tx, { publicacion: scope.IdPublicacion, intento: idIntento, actor,
+          accion: error.code === 'REVIEW_POLICY_NEVER'
+            ? 'emision_denegada_nunca' : 'emision_denegada_unico',
+          detalle: { idempotencyKey: key, motivo: disponibilidad.Motivo } });
+      }
+      await completarIdempotencia(tx, idem.id, { error }, error.status);
+      return { error };
     }
 
     if (disponibilidad.Acceso === 'unico') {
@@ -411,26 +483,54 @@ export async function emitirSesionRevision(actor: ActorBanco, idIntento: number,
       }
     }
 
+    const emisionMs = instant(scope.FechaServidor)!;
+    const maximaMs = emisionMs + DURACION_SESION_SEGUNDOS * 1000;
+    const limiteMs = instant(disponibilidad.DisponibleHasta);
+    const expiracionMs = limiteMs === null ? maximaMs : Math.min(maximaMs, limiteMs);
+    if (expiracionMs <= emisionMs) {
+      const error = errorDisponibilidad({
+        ...disponibilidad, RevisionDisponible: false, Motivo: 'EFFECTIVE_WINDOW_EXPIRED',
+      });
+      await completarIdempotencia(tx, idem.id, { error }, error.status);
+      return { error };
+    }
+    const limitadaPor = limiteMs !== null && limiteMs < maximaMs
+      ? (disponibilidad.Origen === 'individual' ? 'permiso' : 'ventana')
+      : 'duracion';
     const idSesion = crypto.randomUUID();
     const inserted = (await consultar(tx, `INSERT INTO dbo.SesionRevisionIntento
       (Id,IdIntento,IdUsuario,ModoPoliticaSnapshot,AccesoSnapshot,RevisionPoliticaSnapshot,
-       IdPermisoSnapshot,Estado,EsActivaUnica,FechaEmision,FechaExpiracion)
+       IdPermisoSnapshot,Estado,EsActivaUnica,FechaEmision,FechaExpiracion,
+       DisponibleDesdeSnapshot,DisponibleHastaSnapshot,ExpiracionLimitadaPor)
       OUTPUT inserted.Id AS IdSesion,inserted.IdIntento,inserted.AccesoSnapshot AS Acceso,
         inserted.FechaEmision,inserted.FechaExpiracion
       VALUES(@Sesion,@Intento,@Usuario,@Modo,@Acceso,@Revision,@Permiso,'emitida',@ActivaUnica,
-        SYSUTCDATETIME(),DATEADD(MINUTE,5,SYSUTCDATETIME()))`, {
+        CAST(@Emision AS datetime2(3)),CAST(@Expiracion AS datetime2(3)),
+        CAST(@DisponibleDesde AS datetime2(3)),CAST(@DisponibleHasta AS datetime2(3)),@LimitadaPor)`, {
       Sesion: idSesion, Intento: idIntento, Usuario: actor.id, Modo: disponibilidad.Modo,
       Acceso: disponibilidad.Acceso, Revision: disponibilidad.RevisionPolitica,
       Permiso: disponibilidad.IdPermiso, ActivaUnica: disponibilidad.Acceso === 'unico',
+      Emision: new Date(emisionMs).toISOString(), Expiracion: new Date(expiracionMs).toISOString(),
+      DisponibleDesde: disponibilidad.DisponibleDesde == null
+        ? null : new Date(instant(disponibilidad.DisponibleDesde)!).toISOString(),
+      DisponibleHasta: disponibilidad.DisponibleHasta == null
+        ? null : new Date(instant(disponibilidad.DisponibleHasta)!).toISOString(),
+      LimitadaPor: limitadaPor,
     })).recordset[0];
     const data = { ...inserted, Reutilizada: false };
     await auditar(tx, { publicacion: scope.IdPublicacion, intento: idIntento,
       sesion: idSesion, actor, accion: 'sesion_emitida',
       detalle: { acceso: disponibilidad.Acceso, origen: disponibilidad.Origen,
-        revisionPolitica: disponibilidad.RevisionPolitica } });
+        revisionPolitica: disponibilidad.RevisionPolitica, limitadaPor,
+        disponibleDesde: disponibilidad.DisponibleDesde,
+        disponibleHasta: disponibilidad.DisponibleHasta,
+        fechaExpiracion: new Date(expiracionMs).toISOString() } });
     await completarIdempotencia(tx, idem.id, data, 201);
     return { data, status: 201 };
   });
+  if ('error' in outcome && outcome.error) {
+    throw new BancoError(outcome.error.status, outcome.error.message, outcome.error.code);
+  }
   return outcome;
 }
 
@@ -496,6 +596,13 @@ export async function consumirContenidoRevision(actor: ActorBanco, idSesion: str
     throw new BancoError(403, 'Sólo el alumno titular puede consumir una sesión', 'REVIEW_SCOPE_FORBIDDEN');
   }
   const outcome = await atomico(async tx => {
+    const referencia = (await consultar(tx, `SELECT IdIntento FROM dbo.SesionRevisionIntento
+      WHERE Id=@Sesion`, { Sesion: idSesion })).recordset[0];
+    if (!referencia) return {
+      error: new BancoError(404, 'Sesión de revisión no encontrada', 'REVIEW_SESSION_NOT_FOUND'),
+    };
+    await consultar(tx, `SELECT Id FROM dbo.Intento WITH (UPDLOCK,HOLDLOCK)
+      WHERE Id=@Intento`, { Intento: Number(referencia.IdIntento) });
     const session = (await consultar(tx, `SELECT S.*,I.IdAlumno,I.IdPublicacion,I.CorreccionConfirmada,
         SYSUTCDATETIME() AS FechaServidor,PE.Estado AS EstadoPermisoActual
       FROM dbo.SesionRevisionIntento S WITH (UPDLOCK,HOLDLOCK)
@@ -533,6 +640,12 @@ export async function consumirContenidoRevision(actor: ActorBanco, idSesion: str
 
     const primerConsumo = Number(session.CantidadConsumos) === 0;
     if (session.AccesoSnapshot === 'unico') {
+      const consumoExistente = (await consultar(tx, `SELECT IdIntento FROM dbo.ConsumoRevisionUnicaIntento
+        WITH (UPDLOCK,HOLDLOCK) WHERE IdIntento=@Intento`,
+      { Intento: Number(session.IdIntento) })).recordset[0];
+      if (consumoExistente) {
+        return { error: new BancoError(409, 'El acceso único ya fue consumido', 'REVIEW_SESSION_CONSUMED') };
+      }
       const changed = await consultar(tx, `UPDATE dbo.SesionRevisionIntento
         SET Estado='consumida',EsActivaUnica=0,FechaPrimerConsumo=SYSUTCDATETIME(),
           FechaUltimoConsumo=SYSUTCDATETIME(),CantidadConsumos=1
@@ -540,6 +653,11 @@ export async function consumirContenidoRevision(actor: ActorBanco, idSesion: str
       if (!changed.recordset.length) {
         return { error: new BancoError(409, 'La sesión de revisión ya fue consumida', 'REVIEW_SESSION_CONSUMED') };
       }
+      await consultar(tx, `INSERT INTO dbo.ConsumoRevisionUnicaIntento
+        (IdIntento,IdSesion,IdUsuario,FechaConsumo,Origen)
+        VALUES(@Intento,@Sesion,@Usuario,SYSUTCDATETIME(),'runtime')`, {
+        Intento: Number(session.IdIntento), Sesion: idSesion, Usuario: actor.id,
+      });
     } else {
       await consultar(tx, `UPDATE dbo.SesionRevisionIntento SET
         FechaPrimerConsumo=COALESCE(FechaPrimerConsumo,SYSUTCDATETIME()),

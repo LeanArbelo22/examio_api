@@ -20,19 +20,26 @@ const idPositivo = (value: string, nombre: string): number => {
 const revisionDisponibleSql = `CAST(CASE
   WHEN I.Estado='entregado'
    AND I.CorreccionConfirmada=1
+   AND COALESCE(PREV.Modo,'al_corregir')<>'nunca'
    AND ISNULL(PER.Estado,'')<>'revocado'
    AND (
      (PER.Estado='activo'
        AND (PER.FechaDesde IS NULL OR PER.FechaDesde<=SYSUTCDATETIME())
-       AND (PER.FechaHasta IS NULL OR PER.FechaHasta>=SYSUTCDATETIME()))
+       AND (PER.FechaHasta IS NULL OR PER.FechaHasta>SYSUTCDATETIME())
+       AND NOT (PER.Acceso='unico' AND CUR.IdIntento IS NOT NULL))
      OR
-     (COALESCE(IVO.IdIntento,IA.IdIntento)=I.Id
+     ((PER.Estado IS NULL OR PER.Estado<>'activo'
+         OR (PER.FechaDesde IS NOT NULL AND PER.FechaDesde>SYSUTCDATETIME())
+         OR (PER.FechaHasta IS NOT NULL AND PER.FechaHasta<=SYSUTCDATETIME()))
+       AND COALESCE(PREV.Modo,'al_corregir')<>'manual'
+       AND COALESCE(IVO.IdIntento,IA.IdIntento)=I.Id
        AND (
          COALESCE(PREV.Modo,'al_corregir')='al_corregir'
          OR (PREV.Modo='ventana'
            AND PREV.VentanaDesde<=SYSUTCDATETIME()
-           AND PREV.VentanaHasta>=SYSUTCDATETIME())
-       ))
+           AND PREV.VentanaHasta>SYSUTCDATETIME())
+       )
+       AND NOT (COALESCE(PREV.Acceso,'libre')='unico' AND CUR.IdIntento IS NOT NULL))
    )
   THEN 1 ELSE 0 END AS bit)`;
 
@@ -165,6 +172,7 @@ export const getIntentosDetallados = async (req: Request, res: Response) => {
         INNER JOIN Division DV ON MD.IdDivision = DV.Id
         LEFT JOIN PoliticaRevisionPublicacion PREV ON PREV.IdPublicacion=I.IdPublicacion
         LEFT JOIN PermisoRevisionIntento PER ON PER.IdIntento=I.Id
+        LEFT JOIN ConsumoRevisionUnicaIntento CUR ON CUR.IdIntento=I.Id
         LEFT JOIN IntentoValidoOverride IVO
           ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
         OUTER APPLY (
@@ -207,6 +215,7 @@ export const getHistorialCorregido = async (req: Request, res: Response) => {
         INNER JOIN Division DV ON MD.IdDivision = DV.Id
         LEFT JOIN PoliticaRevisionPublicacion PREV ON PREV.IdPublicacion=I.IdPublicacion
         LEFT JOIN PermisoRevisionIntento PER ON PER.IdIntento=I.Id
+        LEFT JOIN ConsumoRevisionUnicaIntento CUR ON CUR.IdIntento=I.Id
         LEFT JOIN IntentoValidoOverride IVO
           ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
         OUTER APPLY (

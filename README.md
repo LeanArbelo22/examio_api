@@ -2271,12 +2271,26 @@ Todos son opcionales y se combinan con AND: `idMateria`, `idMateriaDivision`,
 `ordenarPor` y `ordenDireccion`. `rendimiento-preguntas` admite además `idPregunta`;
 el detalle de opciones recibe ese ID exclusivamente en el path.
 
+La ampliación docente acordada está versionada como **v1.0.0** en
+[`docs/CONTRATO_REPORTES_DOCENTE_V1.md`](docs/CONTRATO_REPORTES_DOCENTE_V1.md).
+Documenta los bloques oficiales paralelos, hallazgos, muestras/exclusiones y evidencia
+exacta por `claveContenido`. No incluye todavía el resumen institucional.
+
 - `estadoIntento`: `en_progreso|entregado|vencido|anulado`.
 - `alcanceIntentos`: `todos` (default) o `validos`. El segundo usa el override manual
   o el último intento entregado con desempate estable.
 - `estadoCorreccion`: `todas` (default), `pendiente` o `confirmada`.
 - `pagina`: default 1. `limite`: default 25, máximo 100.
 - `ordenDireccion`: `asc|desc`, default `desc`.
+- `soloHallazgosBajoRendimiento`: sólo en preguntas. Aplica la regla v1 (`<30%` y
+  al menos 10 muestras confirmadas). Si alcance/corrección se omiten usa
+  `validos + confirmada`; valores explícitos incompatibles devuelven
+  `400 REPORT_OFFICIAL_SCOPE_REQUIRED`.
+- La regla efectiva se devuelve canónicamente en `data.reglaHallazgo`, al mismo nivel
+  que `data.resumenFiltro`. `criterios.reglaBajoRendimiento` permanece como alias
+  compatible.
+- `claveContenido`: en opciones identifica la misma agrupación histórica del ítem de
+  preguntas y evita limitar copias al `idPregunta` representativo.
 - Preguntas y grupos permiten ordenar por nombre, presentadas, respondidas, omitidas,
   pendientes, tasa de acierto, porcentaje de puntaje o tiempo promedio. Opciones permiten
   `posicion`, `selecciones` o `porcentajeSeleccion`.
@@ -2304,6 +2318,9 @@ devuelve `403 REPORT_SCOPE_FORBIDDEN` sin revelar si el recurso existe para otro
   proporción de presentaciones posee tiempo.
 - Las opciones y distractores se leen de `IntentoPreguntaOpcionSnapshot`, no de la pregunta
   actual. La justificación se contabiliza por separado y no modifica la métrica académica.
+- Los campos oficiales son paralelos a los legacy. `porcentajePuntajePromedio` no cambia
+  fórmula ni población; con alcance efectivo `validos + confirmada`, su población elegible
+  coincide con `muestrasConfirmadas`.
 
 No se etiqueta una diferencia entre variantes como estadísticamente significativa: se
 devuelve `diferenciaVariantesPuntosPorcentuales` y el tamaño de muestra para que producto

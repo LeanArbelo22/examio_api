@@ -105,6 +105,7 @@ const validarRangoFechas = (
 
 export const RendimientoPreguntasQuerySchema = z.object({
   ...rendimientoPreguntasBaseShape,
+  soloHallazgosBajoRendimiento: optionalBoolean,
   ordenarPor: z.enum([
     'pregunta', 'presentadas', 'respondidas', 'omitidas', 'pendientesCorreccion',
     'tasaAcierto', 'porcentajePuntaje', 'tiempoPromedio',
@@ -124,6 +125,7 @@ delete (opcionesShape as Partial<typeof rendimientoPreguntasBaseShape>).idPregun
 
 export const RendimientoOpcionesQuerySchema = z.object({
   ...opcionesShape,
+  claveContenido: z.string().trim().min(1).max(80).optional(),
   ordenarPor: z.enum(['posicion', 'selecciones', 'porcentajeSeleccion']).default('posicion'),
 }).strict().superRefine(validarRangoFechas);
 

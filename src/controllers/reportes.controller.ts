@@ -18,6 +18,7 @@ import {
   getRendimientoOpcionesReport,
   getRendimientoPreguntasReport,
   isQuestionReportScopeAllowed,
+  ReportePreguntasError,
 } from '../services/reportes-preguntas.service';
 
 const reportScopeError = (res: Response) => res.status(403).json({
@@ -41,7 +42,25 @@ const getReportTeacherId = (req: Request): number | null | undefined => {
 };
 
 export const getRendimientoPreguntas = async (req: Request, res: Response) => {
-  const parsed = RendimientoPreguntasQuerySchema.safeParse(req.query);
+  const rawQuery = { ...req.query };
+  const solicitaHallazgos = req.query.soloHallazgosBajoRendimiento === 'true';
+  if (solicitaHallazgos) {
+    const alcanceExplicito = Object.prototype.hasOwnProperty.call(req.query, 'alcanceIntentos');
+    const correccionExplicita = Object.prototype.hasOwnProperty.call(req.query, 'estadoCorreccion');
+    const alcanceIncompatible = alcanceExplicito && req.query.alcanceIntentos === 'todos';
+    const correccionIncompatible = correccionExplicita
+      && (req.query.estadoCorreccion === 'todas' || req.query.estadoCorreccion === 'pendiente');
+    if (alcanceIncompatible || correccionIncompatible) {
+      return res.status(400).json({
+        success: false,
+        message: 'Los hallazgos requieren intentos válidos y corrección confirmada',
+        code: 'REPORT_OFFICIAL_SCOPE_REQUIRED',
+      });
+    }
+    if (!alcanceExplicito) rawQuery.alcanceIntentos = 'validos';
+    if (!correccionExplicita) rawQuery.estadoCorreccion = 'confirmada';
+  }
+  const parsed = RendimientoPreguntasQuerySchema.safeParse(rawQuery);
   if (!parsed.success) return reportValidationError(res, parsed.error.issues);
   try {
     const idDocente = getReportTeacherId(req);
@@ -51,7 +70,14 @@ export const getRendimientoPreguntas = async (req: Request, res: Response) => {
     }
     const data = await getRendimientoPreguntasReport(parsed.data, idDocente);
     return res.json({ success: true, data });
-  } catch {
+  } catch (error) {
+    if (error instanceof ReportePreguntasError) {
+      return res.status(error.status).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+    }
     return res.status(500).json({
       success: false,
       message: 'No se pudo obtener el rendimiento por pregunta',
@@ -71,7 +97,14 @@ export const getRendimientoGrupos = async (req: Request, res: Response) => {
     }
     const data = await getRendimientoGruposReport(parsed.data, idDocente);
     return res.json({ success: true, data });
-  } catch {
+  } catch (error) {
+    if (error instanceof ReportePreguntasError) {
+      return res.status(error.status).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+    }
     return res.status(500).json({
       success: false,
       message: 'No se pudo obtener el rendimiento por grupo',
@@ -98,7 +131,14 @@ export const getRendimientoOpciones = async (req: Request, res: Response) => {
     }
     const data = await getRendimientoOpcionesReport(parsedId.data, parsed.data, idDocente);
     return res.json({ success: true, data });
-  } catch {
+  } catch (error) {
+    if (error instanceof ReportePreguntasError) {
+      return res.status(error.status).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+    }
     return res.status(500).json({
       success: false,
       message: 'No se pudo obtener el rendimiento de opciones',

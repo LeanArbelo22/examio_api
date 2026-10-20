@@ -25,6 +25,12 @@ const kpis = {
 const questionResult = (overrides: Record<string, unknown> = {}) => ({
   recordsets: [
     [kpis],
+    [{ PresentacionesOficiales: 220, MuestrasConfirmadas: 210,
+      PresentacionesExcluidasSinPuntaje: 6,
+      PresentacionesExcluidasSinMaximoPositivo: 4 }],
+    [{ PreguntasEnCoberturaGeneral: 17, PreguntasConMuestraSuficiente: 12,
+      PreguntasConMuestraInsuficiente: 5, PreguntasCoincidentes: 1,
+      PresentacionesCoincidentes: 20, MuestrasConfirmadasCoincidentes: 18 }],
     [{
       ClaveContenido: 'a'.repeat(64), ContenidoHashSnapshot: 'a'.repeat(64),
       IdPregunta: 10, IdGrupoPregunta: 3, CantidadPreguntasOrigen: 2, CantidadGrupos: 1,
@@ -37,6 +43,10 @@ const questionResult = (overrides: Record<string, unknown> = {}) => ({
       MuestrasTiempo: 15, MuestrasTiempoNuevas: 13, MuestrasTiempoLegacy: 2,
       CoberturaTemporal: 0.75, TiempoPromedioMilisegundos: 30000,
       TiempoMedianaMilisegundos: 25000, TiempoMaximoMilisegundos: 80000,
+      PresentacionesOficiales: 20, MuestrasConfirmadas: 18,
+      PresentacionesExcluidasSinPuntaje: 1,
+      PresentacionesExcluidasSinMaximoPositivo: 1,
+      PorcentajePuntajePromedioOficial: 28.5, EsHallazgoBajoRendimiento: true,
     }],
     [{ Total: 1 }],
   ],
@@ -81,11 +91,19 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
     expect(res.body.data.kpis).toMatchObject({
       presentadas: 240, respondidas: 212, omitidas: 28,
       pendientesCorreccion: 14, coberturaTemporal: 0.8167,
+      presentacionesOficiales: 220, muestrasConfirmadas: 210,
     });
     expect(res.body.data.items[0]).toMatchObject({
       contenidoHashSnapshot: 'a'.repeat(64), tipo: 'multiple',
       parciales: 5, porcentajePuntajePromedio: 75,
       tieneProcedenciaBanco: true, cantidadPreguntasOrigen: 2,
+      muestrasConfirmadas: 18,
+      hallazgoBajoRendimiento: { detectado: true, codigo: 'pregunta_bajo_rendimiento', version: 1 },
+    });
+    expect(res.body.data.resumenFiltro).toMatchObject({
+      preguntasEnCoberturaGeneral: 17,
+      preguntasConMuestraSuficiente: 12,
+      preguntasConMuestraInsuficiente: 5,
     });
     expect(res.body.data.pagination).toEqual({ page: 1, limit: 25, total: 1, totalPages: 1 });
 
@@ -116,8 +134,8 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
     expect(dbRequest.input).toHaveBeenCalledWith('IdPregunta', 'INT', 10);
     const sqlText = dbRequest.query.mock.calls[0][0];
     expect(sqlText).toContain('LEFT JOIN dbo.IntentoValidoOverride');
-    expect(sqlText).toContain("I.Estado='entregado' AND I.Id=IVS.IdIntentoValido");
-    expect(sqlText).toContain('I.CorreccionConfirmada=1 AND IP.PuntajeObtenido IS NOT NULL');
+    expect(sqlText).toContain("EstadoIntento='entregado' AND IdIntento=IdIntentoValido");
+    expect(sqlText).toContain('CorreccionConfirmada=1 AND PuntajeObtenido IS NOT NULL');
     expect(sqlText).toContain('ORDER BY TasaAcierto ASC,ClaveContenido ASC');
   });
 
@@ -126,6 +144,12 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
       recordsets: [
         [{ ...kpis, MuestrasTiempo: 0, MuestrasTiempoNuevas: 0, MuestrasTiempoLegacy: 0,
           CoberturaTemporal: 0, TiempoPromedioMilisegundos: null, TiempoMaximoMilisegundos: null }],
+        [{ PresentacionesOficiales: 4, MuestrasConfirmadas: 4,
+          PresentacionesExcluidasSinPuntaje: 0,
+          PresentacionesExcluidasSinMaximoPositivo: 0 }],
+        [{ PreguntasEnCoberturaGeneral: 1, PreguntasConMuestraSuficiente: 0,
+          PreguntasConMuestraInsuficiente: 1, PreguntasCoincidentes: 0,
+          PresentacionesCoincidentes: 0, MuestrasConfirmadasCoincidentes: 0 }],
         [{ ClaveContenido: 'legacy:10', ContenidoHashSnapshot: null, IdPregunta: 10,
           Presentadas: 4, MuestrasTiempo: 0, CoberturaTemporal: 0,
           TiempoPromedioMilisegundos: null, TiempoMedianaMilisegundos: null,
@@ -153,7 +177,13 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
         PorcentajePuntajePromedio: null, TasaAcierto: null, MuestrasTiempo: 0,
         MuestrasTiempoNuevas: 0, MuestrasTiempoLegacy: 0, CoberturaTemporal: 0,
         TiempoPromedioMilisegundos: null, TiempoMaximoMilisegundos: null,
-      }], [], [{ Total: 0 }]],
+      }], [{ PresentacionesOficiales: 0, MuestrasConfirmadas: 0,
+        PresentacionesExcluidasSinPuntaje: 0,
+        PresentacionesExcluidasSinMaximoPositivo: 0 }],
+      [{ PreguntasEnCoberturaGeneral: 0, PreguntasConMuestraSuficiente: 0,
+        PreguntasConMuestraInsuficiente: 0, PreguntasCoincidentes: 0,
+        PresentacionesCoincidentes: 0, MuestrasConfirmadasCoincidentes: 0 }],
+      [], [{ Total: 0 }]],
     }));
 
     const res = await request(app)
@@ -170,12 +200,17 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
     dbRequest.query.mockResolvedValueOnce({
       recordsets: [
         [kpis],
+        [{ PresentacionesOficiales: 38, MuestrasConfirmadas: 35,
+          PresentacionesExcluidasSinPuntaje: 2,
+          PresentacionesExcluidasSinMaximoPositivo: 1 }],
         [{ IdGrupoPregunta: 3, Grupo: 'Redes', CantidadVariantes: 2,
-          Presentadas: 40, DiferenciaVariantesPuntosPorcentuales: 12.5 }],
+          Presentadas: 40, DiferenciaVariantesPuntosPorcentuales: 12.5,
+          PresentacionesOficiales: 38, MuestrasConfirmadas: 35 }],
         [{ Total: 1 }],
         [
           { IdGrupoPregunta: 3, ClaveContenido: 'a'.repeat(64), IdPregunta: 10,
-            Enunciado: 'TCP', PorcentajePuntajePromedio: 80 },
+            Enunciado: 'TCP', PorcentajePuntajePromedio: 80,
+            PresentacionesOficiales: 20, MuestrasConfirmadas: 18 },
           { IdGrupoPregunta: 3, ClaveContenido: 'b'.repeat(64), IdPregunta: 11,
             Enunciado: 'UDP', PorcentajePuntajePromedio: 67.5 },
         ],
@@ -193,6 +228,9 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
       diferenciaVariantesPuntosPorcentuales: 12.5,
     });
     expect(res.body.data.items[0].variantes).toHaveLength(2);
+    expect(res.body.data.items[0]).toMatchObject({
+      presentacionesOficiales: 38, muestrasConfirmadas: 35,
+    });
     const sqlText = dbRequest.query.mock.calls[0][0];
     expect(sqlText).toContain('#ReporteVariantesGrupo');
     expect(sqlText).toContain('#GruposPagina');
@@ -226,6 +264,127 @@ describe('Etapa 4 - rendimiento por pregunta, grupo y opciones', () => {
     expect(sqlText).toContain('dbo.RespuestaOpcion');
     expect(sqlText).not.toContain('JOIN dbo.Opcion');
     expect(sqlText).not.toContain('#TiemposRendimientoPregunta');
+  });
+
+  it('aplica el alcance oficial implícito y filtra hallazgos antes de paginar', async () => {
+    dbRequest.query.mockResolvedValueOnce(questionResult());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-preguntas?soloHallazgosBajoRendimiento=true')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios).toMatchObject({
+      alcanceIntentos: 'validos',
+      estadoCorreccion: 'confirmada',
+      soloHallazgosBajoRendimiento: true,
+      reglaBajoRendimiento: {
+        codigo: 'pregunta_bajo_rendimiento',
+        version: 1,
+        porcentajePuntajeMaximoExclusivo: 30,
+        muestrasConfirmadasMinimas: 10,
+      },
+    });
+    expect(res.body.data.reglaHallazgo).toEqual({
+      codigo: 'pregunta_bajo_rendimiento',
+      version: 1,
+      porcentajePuntajeMaximoExclusivo: 30,
+      muestrasConfirmadasMinimas: 10,
+    });
+    expect(res.body.data.resumenFiltro).toBeDefined();
+    const sqlText = dbRequest.query.mock.calls[0][0];
+    expect(sqlText).toContain('MuestrasConfirmadas),0)>=10');
+    expect(sqlText).toContain('PorcentajePuntajePromedioOficial)<30');
+    expect(sqlText.indexOf('AS PreguntasCoincidentes')).toBeLessThan(
+      sqlText.indexOf('DELETE FROM #ReportePreguntas WHERE EsHallazgoBajoRendimiento=0'),
+    );
+  });
+
+  it.each([
+    'alcanceIntentos=todos',
+    'estadoCorreccion=todas',
+    'estadoCorreccion=pendiente',
+  ])('rechaza alcance explícito incompatible con hallazgos: %s', async incompatible => {
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-preguntas?soloHallazgosBajoRendimiento=true&${incompatible}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REPORT_OFFICIAL_SCOPE_REQUIRED');
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  it('incluye omisiones con puntaje cero y aplica exclusiones oficiales sin doble conteo', async () => {
+    dbRequest.query.mockResolvedValueOnce(questionResult());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-preguntas')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.body.data.kpis).toMatchObject({
+      presentacionesOficiales: 220,
+      muestrasConfirmadas: 210,
+      presentacionesExcluidasSinPuntaje: 6,
+      presentacionesExcluidasSinMaximoPositivo: 4,
+    });
+    const sqlText = dbRequest.query.mock.calls[0][0];
+    expect(sqlText).toContain('PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0');
+    expect(sqlText).toContain('PuntajeObtenido IS NULL');
+    expect(sqlText).toContain('PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0');
+    expect(sqlText).toContain('PuntajeObtenido=0');
+  });
+
+  it('agrega evidencia por claveContenido sin limitarla al idPregunta representativo', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordsets: [
+        [{ AnchorValido: 1 }],
+        [{ CantidadFormas: 1 }],
+        [{ Presentadas: 20, Respondidas: 18, Omitidas: 2,
+          PresentacionesOficiales: 19, MuestrasConfirmadas: 18,
+          PresentacionesExcluidasSinPuntaje: 1,
+          PresentacionesExcluidasSinMaximoPositivo: 0,
+          JustificacionesEntregadas: 8, TotalSelecciones: 25, SeleccionesDistractores: 7 }],
+        [{ ClaveContenido: 'a'.repeat(64), Posicion: 1, Texto: 'TCP',
+          EsCorrecta: true, EsDistractor: false, Presentaciones: 20,
+          Selecciones: 11, PorcentajeSeleccion: 61.11 }],
+        [{ Total: 1 }],
+      ],
+      recordset: [],
+    });
+
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-preguntas/10/opciones?claveContenido=${'a'.repeat(64)}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios.claveContenido).toBe('a'.repeat(64));
+    expect(res.body.data.kpis).toMatchObject({ presentadas: 20, muestrasConfirmadas: 18 });
+    const sqlText = dbRequest.query.mock.calls[0][0];
+    expect(sqlText).toContain('IdPregunta=@IdPreguntaObjetivo AND ClaveContenido=@ClaveContenido');
+    expect(sqlText).toContain('DELETE FROM #BaseRendimientoPregunta WHERE ClaveContenido<>@ClaveContenido');
+    expect(sqlText).not.toContain('IP.IdPregunta=@IdPreguntaObjetivo OR');
+  });
+
+  it.each([
+    { anchor: 0, shapes: 0, status: 404, code: 'QUESTION_CONTENT_NOT_FOUND' },
+    { anchor: 1, shapes: 2, status: 409, code: 'QUESTION_OPTION_EVIDENCE_INCONSISTENT' },
+  ])('devuelve $code para evidencia histórica no utilizable', async scenario => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordsets: [
+        [{ AnchorValido: scenario.anchor }],
+        [{ CantidadFormas: scenario.shapes }],
+        [], [], [{ Total: 0 }],
+      ],
+      recordset: [],
+    });
+
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-preguntas/10/opciones?claveContenido=${'a'.repeat(64)}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(scenario.status);
+    expect(res.body.code).toBe(scenario.code);
+    expect(JSON.stringify(res.body)).not.toContain('dbo.');
   });
 
   it('limita al docente a sus comisiones y rechaza filtros fuera de alcance', async () => {

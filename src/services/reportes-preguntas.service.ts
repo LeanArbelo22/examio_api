@@ -10,6 +10,24 @@ import {
 
 type FiltrosBase = FiltrosRendimientoPregunta | RendimientoOpcionesQuery;
 
+const REGLA_BAJO_RENDIMIENTO = {
+  codigo: 'pregunta_bajo_rendimiento',
+  version: 1,
+  porcentajePuntajeMaximoExclusivo: 30,
+  muestrasConfirmadasMinimas: 10,
+} as const;
+
+export class ReportePreguntasError extends Error {
+  constructor(
+    public readonly code: 'QUESTION_CONTENT_NOT_FOUND' | 'QUESTION_OPTION_EVIDENCE_INCONSISTENT',
+    message: string,
+    public readonly status: 404 | 409,
+  ) {
+    super(message);
+    this.name = 'ReportePreguntasError';
+  }
+}
+
 const identifierFilters = [
   ['idMateria', 'MD.IdMateria=@IdMateria'],
   ['idMateriaDivision', 'MD.Id=@IdMateriaDivision'],
@@ -29,6 +47,9 @@ const bindFilters = (request: sql.Request, filters: FiltrosBase) => {
   if (filters.fechaDesde) request.input('FechaDesde', sql.DateTime2, new Date(filters.fechaDesde));
   if (filters.fechaHasta) request.input('FechaHasta', sql.DateTime2, new Date(filters.fechaHasta));
   if (filters.estadoIntento) request.input('EstadoIntento', sql.VarChar(20), filters.estadoIntento);
+  if ('claveContenido' in filters && filters.claveContenido) {
+    request.input('ClaveContenido', sql.VarChar(80), filters.claveContenido);
+  }
   return request;
 };
 
@@ -73,13 +94,13 @@ const baseSql = (
   const scopeClause = idDocente === null ? '' : 'AND MD.IdDocente=@IdDocente';
   const dateFromClause = filters.fechaDesde ? 'AND I.FechaInicio>=@FechaDesde' : '';
   const dateToClause = filters.fechaHasta ? 'AND I.FechaInicio<=@FechaHasta' : '';
-  const attemptStateClause = filters.estadoIntento ? 'AND I.Estado=@EstadoIntento' : '';
+  const attemptStateClause = filters.estadoIntento ? 'AND EstadoIntento=@EstadoIntento' : '';
   const correctionClause = filters.estadoCorreccion === 'pendiente'
-    ? 'AND (I.CorreccionConfirmada=0 OR IP.PuntajeObtenido IS NULL)'
+    ? 'AND (CorreccionConfirmada=0 OR PuntajeObtenido IS NULL)'
     : filters.estadoCorreccion === 'confirmada'
-      ? 'AND I.CorreccionConfirmada=1 AND IP.PuntajeObtenido IS NOT NULL'
+      ? 'AND CorreccionConfirmada=1 AND PuntajeObtenido IS NOT NULL'
       : '';
-  const validJoins = filters.alcanceIntentos === 'validos' ? `
+  const validJoins = `
     LEFT JOIN dbo.IntentoValidoOverride IVO
       ON IVO.IdPublicacion=I.IdPublicacion AND IVO.IdAlumno=I.IdAlumno
     OUTER APPLY (
@@ -90,9 +111,9 @@ const baseSql = (
           AND IV.Estado='entregado'
         ORDER BY IV.FechaFin DESC,IV.NumeroIntento DESC,IV.Id DESC
       )) AS IdIntentoValido
-    ) IVS` : '';
+    ) IVS`;
   const validClause = filters.alcanceIntentos === 'validos'
-    ? "AND I.Estado='entregado' AND I.Id=IVS.IdIntentoValido"
+    ? "AND EstadoIntento='entregado' AND IdIntento=IdIntentoValido"
     : '';
 
   const timeSql = includeTimes ? `
@@ -143,6 +164,7 @@ const baseSql = (
       IP.Id AS IdIntentoPregunta,IP.IdPregunta,P.IdGrupoPregunta,
       GP.IdActividad,PU.Id AS IdPublicacion,MD.Id AS IdMateriaDivision,MD.IdMateria,
       I.Id AS IdIntento,I.IdAlumno,I.Estado AS EstadoIntento,I.CorreccionConfirmada,
+      IVS.IdIntentoValido,
       COALESCE(IP.ContenidoHashSnapshot,CONCAT('legacy:',IP.IdPregunta)) AS ClaveContenido,
       IP.ContenidoHashSnapshot,COALESCE(IP.EnunciadoSnapshot,P.Enunciado) AS Enunciado,
       COALESCE(IP.TipoSnapshot,P.Tipo) AS TipoPregunta,
@@ -156,7 +178,7 @@ const baseSql = (
         THEN 1 ELSE 0 END AS bit) AS Respondida,
       CAST(CASE WHEN NULLIF(LTRIM(RTRIM(COALESCE(R.Justificacion,N''))),N'') IS NOT NULL
         THEN 1 ELSE 0 END AS bit) AS TieneJustificacion
-    INTO #BaseRendimientoPregunta
+    INTO #BaseRendimientoPreguntaCompleta
     FROM dbo.Intento I
     JOIN dbo.Publicacion PU ON PU.Id=I.IdPublicacion
     JOIN dbo.Actividad A ON A.Id=PU.IdActividad
@@ -172,8 +194,16 @@ const baseSql = (
     ) ROS ON ROS.IdRespuesta=R.Id
     ${validJoins}
     WHERE A.Tipo='evaluacion' ${scopeClause} ${identifierWhere(filters)}
-      ${dateFromClause} ${dateToClause} ${attemptStateClause}
-      ${correctionClause} ${validClause} ${extraIdentityClause};
+      ${dateFromClause} ${dateToClause} ${extraIdentityClause};
+
+    SELECT * INTO #BaseRendimientoPregunta
+    FROM #BaseRendimientoPreguntaCompleta
+    WHERE 1=1 ${attemptStateClause} ${correctionClause} ${validClause};
+
+    SELECT * INTO #BaseRendimientoPreguntaOficial
+    FROM #BaseRendimientoPreguntaCompleta
+    WHERE EstadoIntento='entregado' AND IdIntento=IdIntentoValido
+      AND CorreccionConfirmada=1;
     ${timeSql}
   `;
 };
@@ -206,6 +236,16 @@ const kpisSql = `
     CAST(MAX(T.TiempoMilisegundos) AS DECIMAL(18,2)) AS TiempoMaximoMilisegundos
   FROM #BaseRendimientoPregunta B
   LEFT JOIN #TiemposRendimientoPregunta T ON T.IdIntentoPregunta=B.IdIntentoPregunta;
+
+  SELECT COUNT(*) AS PresentacionesOficiales,
+    COALESCE(SUM(CASE WHEN PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0
+      THEN 1 ELSE 0 END),0) AS MuestrasConfirmadas,
+    COALESCE(SUM(CASE WHEN PuntajeObtenido IS NULL THEN 1 ELSE 0 END),0)
+      AS PresentacionesExcluidasSinPuntaje,
+    COALESCE(SUM(CASE WHEN PuntajeObtenido IS NOT NULL
+      AND (PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0) THEN 1 ELSE 0 END),0)
+      AS PresentacionesExcluidasSinMaximoPositivo
+  FROM #BaseRendimientoPreguntaOficial;
 `;
 
 const criterios = (filters: FiltrosBase) => ({
@@ -213,6 +253,11 @@ const criterios = (filters: FiltrosBase) => ({
   estadoCorreccion: filters.estadoCorreccion,
   normalizacionPuntaje: 'porcentaje_puntaje_maximo',
   identidadContenido: 'contenidoHashSnapshot',
+  poblacionOficial: {
+    alcanceIntentos: 'validos',
+    estadoCorreccion: 'confirmada',
+    reglaExclusion: 'sin_puntaje_luego_sin_maximo_positivo',
+  },
 });
 
 const pagination = (page: number, limit: number, total: number) => ({
@@ -250,6 +295,22 @@ const questionAggregationSql = `
   INTO #TiempoPorContenido
   FROM TiempoConMediana GROUP BY ClaveContenido;
 
+  SELECT ClaveContenido,
+    COUNT(*) AS PresentacionesOficiales,
+    SUM(CASE WHEN PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0
+      THEN 1 ELSE 0 END) AS MuestrasConfirmadas,
+    SUM(CASE WHEN PuntajeObtenido IS NULL THEN 1 ELSE 0 END)
+      AS PresentacionesExcluidasSinPuntaje,
+    SUM(CASE WHEN PuntajeObtenido IS NOT NULL
+      AND (PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0) THEN 1 ELSE 0 END)
+      AS PresentacionesExcluidasSinMaximoPositivo,
+    CAST(AVG(CASE WHEN PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0
+      THEN PuntajeObtenido*100.0/PuntajeMaximoSnapshot END) AS DECIMAL(9,2))
+      AS PorcentajePuntajePromedioOficial
+  INTO #RendimientoOficialPorContenido
+  FROM #BaseRendimientoPreguntaOficial
+  GROUP BY ClaveContenido;
+
   SELECT
     B.ClaveContenido,B.ContenidoHashSnapshot,
     MIN(B.IdPregunta) AS IdPregunta,MIN(B.IdGrupoPregunta) AS IdGrupoPregunta,
@@ -286,10 +347,21 @@ const questionAggregationSql = `
     CAST(COALESCE(MAX(T.MuestrasTiempo),0)*1.0/COUNT(*) AS DECIMAL(9,4)) AS CoberturaTemporal,
     MAX(T.TiempoPromedioMilisegundos) AS TiempoPromedioMilisegundos,
     MAX(T.TiempoMedianaMilisegundos) AS TiempoMedianaMilisegundos,
-    MAX(T.TiempoMaximoMilisegundos) AS TiempoMaximoMilisegundos
+    MAX(T.TiempoMaximoMilisegundos) AS TiempoMaximoMilisegundos,
+    COALESCE(MAX(O.PresentacionesOficiales),0) AS PresentacionesOficiales,
+    COALESCE(MAX(O.MuestrasConfirmadas),0) AS MuestrasConfirmadas,
+    COALESCE(MAX(O.PresentacionesExcluidasSinPuntaje),0)
+      AS PresentacionesExcluidasSinPuntaje,
+    COALESCE(MAX(O.PresentacionesExcluidasSinMaximoPositivo),0)
+      AS PresentacionesExcluidasSinMaximoPositivo,
+    MAX(O.PorcentajePuntajePromedioOficial) AS PorcentajePuntajePromedioOficial,
+    CAST(CASE WHEN COALESCE(MAX(O.MuestrasConfirmadas),0)>=10
+      AND MAX(O.PorcentajePuntajePromedioOficial)<30 THEN 1 ELSE 0 END AS bit)
+      AS EsHallazgoBajoRendimiento
   INTO #ReportePreguntas
   FROM #BaseRendimientoPregunta B
   LEFT JOIN #TiempoPorContenido T ON T.ClaveContenido=B.ClaveContenido
+  LEFT JOIN #RendimientoOficialPorContenido O ON O.ClaveContenido=B.ClaveContenido
   GROUP BY B.ClaveContenido,B.ContenidoHashSnapshot;
 `;
 
@@ -309,17 +381,54 @@ export async function getRendimientoPreguntasReport(
     ${baseSql(filters, idDocente)}
     ${questionAggregationSql}
     ${kpisSql}
+    SELECT
+      COUNT(*) AS PreguntasEnCoberturaGeneral,
+      COALESCE(SUM(CASE WHEN MuestrasConfirmadas>=10 THEN 1 ELSE 0 END),0)
+        AS PreguntasConMuestraSuficiente,
+      COALESCE(SUM(CASE WHEN MuestrasConfirmadas<10 THEN 1 ELSE 0 END),0)
+        AS PreguntasConMuestraInsuficiente,
+      COALESCE(SUM(CASE WHEN MuestrasConfirmadas>=10
+        AND PorcentajePuntajePromedioOficial<30 THEN 1 ELSE 0 END),0)
+        AS PreguntasCoincidentes,
+      COALESCE(SUM(CASE WHEN MuestrasConfirmadas>=10
+        AND PorcentajePuntajePromedioOficial<30
+        THEN PresentacionesOficiales ELSE 0 END),0) AS PresentacionesCoincidentes,
+      COALESCE(SUM(CASE WHEN MuestrasConfirmadas>=10
+        AND PorcentajePuntajePromedioOficial<30
+        THEN MuestrasConfirmadas ELSE 0 END),0) AS MuestrasConfirmadasCoincidentes
+    FROM #RendimientoOficialPorContenido;
+    ${filters.soloHallazgosBajoRendimiento === true
+      ? 'DELETE FROM #ReportePreguntas WHERE EsHallazgoBajoRendimiento=0;'
+      : ''}
     SELECT * FROM #ReportePreguntas
     ORDER BY ${order} ${direction},ClaveContenido ASC
     OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY;
     SELECT COUNT(*) AS Total FROM #ReportePreguntas;
   `);
-  const [kpiRows = [], itemRows = [], totalRows = []] = result.recordsets ?? [];
+  const [legacyKpiRows = [], officialKpiRows = [], summaryRows = [], itemRows = [], totalRows = []]
+    = result.recordsets ?? [];
   const total = Number(totalRows[0]?.Total ?? 0);
+  const items = (mapKeysToCamelCase(itemRows) as Array<Record<string, unknown>>).map(item => ({
+    ...item,
+    hallazgoBajoRendimiento: {
+      detectado: item.esHallazgoBajoRendimiento === true,
+      codigo: REGLA_BAJO_RENDIMIENTO.codigo,
+      version: REGLA_BAJO_RENDIMIENTO.version,
+    },
+  }));
   return {
-    criterios: criterios(filters),
-    kpis: mapKeysToCamelCase(kpiRows[0] ?? {}),
-    items: mapKeysToCamelCase(itemRows),
+    criterios: {
+      ...criterios(filters),
+      soloHallazgosBajoRendimiento: filters.soloHallazgosBajoRendimiento ?? false,
+      reglaBajoRendimiento: REGLA_BAJO_RENDIMIENTO,
+    },
+    kpis: {
+      ...mapKeysToCamelCase(legacyKpiRows[0] ?? {}),
+      ...mapKeysToCamelCase(officialKpiRows[0] ?? {}),
+    },
+    reglaHallazgo: REGLA_BAJO_RENDIMIENTO,
+    resumenFiltro: mapKeysToCamelCase(summaryRows[0] ?? {}),
+    items,
     pagination: pagination(filters.pagina, filters.limite, total),
   };
 }
@@ -369,6 +478,32 @@ export async function getRendimientoGruposReport(
     INTO #TiempoGrupoVariante
     FROM TiempoConMediana GROUP BY IdGrupoPregunta,ClaveContenido;
 
+    SELECT IdGrupoPregunta,ClaveContenido,
+      COUNT(*) AS PresentacionesOficiales,
+      SUM(CASE WHEN PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0
+        THEN 1 ELSE 0 END) AS MuestrasConfirmadas,
+      SUM(CASE WHEN PuntajeObtenido IS NULL THEN 1 ELSE 0 END)
+        AS PresentacionesExcluidasSinPuntaje,
+      SUM(CASE WHEN PuntajeObtenido IS NOT NULL
+        AND (PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0) THEN 1 ELSE 0 END)
+        AS PresentacionesExcluidasSinMaximoPositivo
+    INTO #RendimientoOficialVariantes
+    FROM #BaseRendimientoPreguntaOficial
+    GROUP BY IdGrupoPregunta,ClaveContenido;
+
+    SELECT IdGrupoPregunta,
+      COUNT(*) AS PresentacionesOficiales,
+      SUM(CASE WHEN PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0
+        THEN 1 ELSE 0 END) AS MuestrasConfirmadas,
+      SUM(CASE WHEN PuntajeObtenido IS NULL THEN 1 ELSE 0 END)
+        AS PresentacionesExcluidasSinPuntaje,
+      SUM(CASE WHEN PuntajeObtenido IS NOT NULL
+        AND (PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0) THEN 1 ELSE 0 END)
+        AS PresentacionesExcluidasSinMaximoPositivo
+    INTO #RendimientoOficialGrupos
+    FROM #BaseRendimientoPreguntaOficial
+    GROUP BY IdGrupoPregunta;
+
     SELECT B.IdGrupoPregunta,B.ClaveContenido,B.ContenidoHashSnapshot,
       MIN(B.IdPregunta) AS IdPregunta,MAX(CONVERT(NVARCHAR(4000),B.Enunciado)) AS Enunciado,
       MAX(B.TipoPregunta) AS Tipo,COUNT(*) AS Presentadas,
@@ -390,11 +525,19 @@ export async function getRendimientoGruposReport(
       CAST(COALESCE(MAX(T.MuestrasTiempo),0)*1.0/COUNT(*) AS DECIMAL(9,4)) AS CoberturaTemporal,
       MAX(T.TiempoPromedioMilisegundos) AS TiempoPromedioMilisegundos,
       MAX(T.TiempoMedianaVarianteMilisegundos) AS TiempoMedianaMilisegundos,
-      MAX(T.TiempoMaximoMilisegundos) AS TiempoMaximoMilisegundos
+      MAX(T.TiempoMaximoMilisegundos) AS TiempoMaximoMilisegundos,
+      COALESCE(MAX(O.PresentacionesOficiales),0) AS PresentacionesOficiales,
+      COALESCE(MAX(O.MuestrasConfirmadas),0) AS MuestrasConfirmadas,
+      COALESCE(MAX(O.PresentacionesExcluidasSinPuntaje),0)
+        AS PresentacionesExcluidasSinPuntaje,
+      COALESCE(MAX(O.PresentacionesExcluidasSinMaximoPositivo),0)
+        AS PresentacionesExcluidasSinMaximoPositivo
     INTO #ReporteVariantesGrupo
     FROM #BaseRendimientoPregunta B
     LEFT JOIN #TiempoGrupoVariante T ON T.IdGrupoPregunta=B.IdGrupoPregunta
       AND T.ClaveContenido=B.ClaveContenido
+    LEFT JOIN #RendimientoOficialVariantes O ON O.IdGrupoPregunta=B.IdGrupoPregunta
+      AND O.ClaveContenido=B.ClaveContenido
     GROUP BY B.IdGrupoPregunta,B.ClaveContenido,B.ContenidoHashSnapshot;
 
     SELECT B.IdGrupoPregunta,MAX(B.GrupoTitulo) AS Grupo,
@@ -421,7 +564,13 @@ export async function getRendimientoGruposReport(
       MAX(TG.TiempoMedianaGrupoMilisegundos) AS TiempoMedianaMilisegundos,
       CAST(MAX(T.TiempoMilisegundos) AS DECIMAL(18,2)) AS TiempoMaximoMilisegundos,
       CAST(MAX(V.PorcentajePuntajePromedio)-MIN(V.PorcentajePuntajePromedio) AS DECIMAL(9,2))
-        AS DiferenciaVariantesPuntosPorcentuales
+        AS DiferenciaVariantesPuntosPorcentuales,
+      COALESCE(MAX(O.PresentacionesOficiales),0) AS PresentacionesOficiales,
+      COALESCE(MAX(O.MuestrasConfirmadas),0) AS MuestrasConfirmadas,
+      COALESCE(MAX(O.PresentacionesExcluidasSinPuntaje),0)
+        AS PresentacionesExcluidasSinPuntaje,
+      COALESCE(MAX(O.PresentacionesExcluidasSinMaximoPositivo),0)
+        AS PresentacionesExcluidasSinMaximoPositivo
     INTO #ReporteGrupos
     FROM #BaseRendimientoPregunta B
     LEFT JOIN #TiemposRendimientoPregunta T ON T.IdIntentoPregunta=B.IdIntentoPregunta
@@ -429,6 +578,7 @@ export async function getRendimientoGruposReport(
       AND TG.ClaveContenido=B.ClaveContenido
     LEFT JOIN #ReporteVariantesGrupo V ON V.IdGrupoPregunta=B.IdGrupoPregunta
       AND V.ClaveContenido=B.ClaveContenido
+    LEFT JOIN #RendimientoOficialGrupos O ON O.IdGrupoPregunta=B.IdGrupoPregunta
     GROUP BY B.IdGrupoPregunta;
 
     ${kpisSql}
@@ -441,7 +591,8 @@ export async function getRendimientoGruposReport(
     JOIN #GruposPagina G ON G.IdGrupoPregunta=V.IdGrupoPregunta
     ORDER BY V.IdGrupoPregunta,V.PorcentajePuntajePromedio DESC,V.ClaveContenido;
   `);
-  const [kpiRows = [], groupRows = [], totalRows = [], variantRows = []] = result.recordsets ?? [];
+  const [legacyKpiRows = [], officialKpiRows = [], groupRows = [], totalRows = [], variantRows = []]
+    = result.recordsets ?? [];
   const variants = mapKeysToCamelCase(variantRows) as Array<Record<string, unknown>>;
   const items = (mapKeysToCamelCase(groupRows) as Array<Record<string, unknown>>).map(group => ({
     ...group,
@@ -450,7 +601,10 @@ export async function getRendimientoGruposReport(
   const total = Number(totalRows[0]?.Total ?? 0);
   return {
     criterios: criterios(filters),
-    kpis: mapKeysToCamelCase(kpiRows[0] ?? {}),
+    kpis: {
+      ...mapKeysToCamelCase(legacyKpiRows[0] ?? {}),
+      ...mapKeysToCamelCase(officialKpiRows[0] ?? {}),
+    },
     items,
     pagination: pagination(filters.pagina, filters.limite, total),
   };
@@ -475,10 +629,35 @@ export async function getRendimientoOpcionesReport(
   const order = optionOrdering[filters.ordenarPor];
   const direction = filters.ordenDireccion === 'asc' ? 'ASC' : 'DESC';
   const optionTieBreak = order === 'Posicion' ? '' : ',Posicion ASC';
-  const identityClause = `AND (
+  const legacyIdentityClause = `AND (
     IP.IdPregunta=@IdPreguntaObjetivo OR
     (PObjetivo.ContenidoHash IS NOT NULL AND IP.ContenidoHashSnapshot=PObjetivo.ContenidoHash)
   )`;
+  const exactIdentity = Boolean(filters.claveContenido);
+  const identityClause = exactIdentity ? '' : legacyIdentityClause;
+  const exactIdentitySql = exactIdentity ? `
+    SELECT
+      CASE WHEN EXISTS (
+        SELECT 1 FROM #BaseRendimientoPregunta
+        WHERE IdPregunta=@IdPreguntaObjetivo AND ClaveContenido=@ClaveContenido
+      ) THEN 1 ELSE 0 END AS AnchorValido;
+
+    DELETE FROM #BaseRendimientoPregunta WHERE ClaveContenido<>@ClaveContenido;
+    DELETE FROM #BaseRendimientoPreguntaOficial WHERE ClaveContenido<>@ClaveContenido;
+
+    SELECT B.IdIntentoPregunta,
+      HASHBYTES('SHA2_256',COALESCE(
+        STRING_AGG(CONVERT(NVARCHAR(MAX),CONCAT(
+          S.Posicion,NCHAR(31),S.TextoSnapshot,NCHAR(31),CONVERT(INT,S.EsCorrectaSnapshot)
+        )),NCHAR(30)) WITHIN GROUP (ORDER BY S.Posicion),N'<sin_opciones>'
+      )) AS Forma
+    INTO #FormasOpciones
+    FROM #BaseRendimientoPregunta B
+    LEFT JOIN dbo.IntentoPreguntaOpcionSnapshot S ON S.IdIntentoPregunta=B.IdIntentoPregunta
+    GROUP BY B.IdIntentoPregunta;
+
+    SELECT COUNT(DISTINCT Forma) AS CantidadFormas FROM #FormasOpciones;
+  ` : '';
 
   const result = await request.query(`
     SET NOCOUNT ON;
@@ -491,6 +670,7 @@ export async function getRendimientoOpcionesReport(
       identityClause.replaceAll('PObjetivo.ContenidoHash', '@HashObjetivo'),
       false,
     )}
+    ${exactIdentitySql}
 
     SELECT B.ClaveContenido,B.ContenidoHashSnapshot,S.Posicion,S.TextoSnapshot AS Texto,
       S.EsCorrectaSnapshot AS EsCorrecta,
@@ -511,6 +691,15 @@ export async function getRendimientoOpcionesReport(
       COALESCE(SUM(CASE WHEN Respondida=1 THEN 1 ELSE 0 END),0) AS Respondidas,
       COALESCE(SUM(CASE WHEN Respondida=0 THEN 1 ELSE 0 END),0) AS Omitidas,
       COALESCE(SUM(CASE WHEN TieneJustificacion=1 THEN 1 ELSE 0 END),0) AS JustificacionesEntregadas,
+      (SELECT COUNT(*) FROM #BaseRendimientoPreguntaOficial) AS PresentacionesOficiales,
+      (SELECT COUNT(*) FROM #BaseRendimientoPreguntaOficial
+        WHERE PuntajeObtenido IS NOT NULL AND PuntajeMaximoSnapshot>0) AS MuestrasConfirmadas,
+      (SELECT COUNT(*) FROM #BaseRendimientoPreguntaOficial
+        WHERE PuntajeObtenido IS NULL) AS PresentacionesExcluidasSinPuntaje,
+      (SELECT COUNT(*) FROM #BaseRendimientoPreguntaOficial
+        WHERE PuntajeObtenido IS NOT NULL
+          AND (PuntajeMaximoSnapshot IS NULL OR PuntajeMaximoSnapshot<=0))
+        AS PresentacionesExcluidasSinMaximoPositivo,
       (SELECT COALESCE(SUM(Selecciones),0) FROM #ReporteOpciones) AS TotalSelecciones,
       (SELECT COALESCE(SUM(CASE WHEN EsDistractor=1 THEN Selecciones ELSE 0 END),0)
         FROM #ReporteOpciones) AS SeleccionesDistractores
@@ -520,10 +709,36 @@ export async function getRendimientoOpcionesReport(
     OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY;
     SELECT COUNT(*) AS Total FROM #ReporteOpciones;
   `);
-  const [kpiRows = [], itemRows = [], totalRows = []] = result.recordsets ?? [];
+  const recordsets = result.recordsets ?? [];
+  let offset = 0;
+  if (exactIdentity) {
+    const anchorRows = recordsets[offset++] ?? [];
+    const shapeRows = recordsets[offset++] ?? [];
+    if (Number(anchorRows[0]?.AnchorValido ?? 0) !== 1) {
+      throw new ReportePreguntasError(
+        'QUESTION_CONTENT_NOT_FOUND',
+        'La pregunta y la identidad histórica no corresponden al alcance solicitado',
+        404,
+      );
+    }
+    if (Number(shapeRows[0]?.CantidadFormas ?? 0) > 1) {
+      throw new ReportePreguntasError(
+        'QUESTION_OPTION_EVIDENCE_INCONSISTENT',
+        'Los snapshots de opciones de esta identidad histórica no son reconciliables',
+        409,
+      );
+    }
+  }
+  const kpiRows = recordsets[offset++] ?? [];
+  const itemRows = recordsets[offset++] ?? [];
+  const totalRows = recordsets[offset] ?? [];
   const total = Number(totalRows[0]?.Total ?? 0);
   return {
-    criterios: { ...criterios(filters), idPregunta },
+    criterios: {
+      ...criterios(filters),
+      idPregunta,
+      claveContenido: filters.claveContenido ?? null,
+    },
     kpis: mapKeysToCamelCase(kpiRows[0] ?? {}),
     items: mapKeysToCamelCase(itemRows),
     pagination: pagination(filters.pagina, filters.limite, total),

@@ -230,6 +230,16 @@ un elemento rechazado o en conflicto no revierte los elementos válidos.
 No se aplica una etiqueta de “diferencia significativa” entre variantes hasta acordar un
 umbral o método estadístico. El contrato expone diferencia porcentual y tamaño de muestra.
 
+### Entrega 1 — análisis docente v1.0.0
+
+- [x] Cerrar contrato en `docs/CONTRATO_REPORTES_DOCENTE_V1.md`.
+- [x] Agregar resultados oficiales y pendientes operativos sin alterar campos/gráfico legacy.
+- [x] Agregar muestras oficiales, exclusiones disjuntas y hallazgo versionado por pregunta.
+- [x] Agregar muestras oficiales a grupos/variantes y evidencia exacta por `claveContenido`.
+- [x] Mantener RBAC, selección canónica de intento y paginación posterior a agregados.
+- [ ] Validar las consultas nuevas contra SQL Server real con datos controlados y planes.
+- [ ] Implementar la Entrega 2 de resumen institucional por materia/comisión.
+
 ## Evolución — etapa 5: políticas y sesiones de revisión
 
 **Estado: CORRECCIÓN BACKEND IMPLEMENTADA — PENDIENTE NUEVA MIGRACIÓN, SQL REAL Y AJUSTE FRONTEND**

@@ -363,6 +363,20 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         IntentosPendientesCorreccion: 20,
         PromedioIntentosCalificados: 7.15,
         TasaAprobacionIntentos: 74.3,
+        OficialIntentosValidosEntregados: 30,
+        OficialResultadosConsiderados: 24,
+        OficialResultadosPendientes: 6,
+        OficialIntentosPendientesConfirmacion: 4,
+        OficialIntentosConfirmadosSinNota: 2,
+        OficialIntentosConPreguntasSinPuntaje: 3,
+        OficialPreguntasSinPuntaje: 5,
+        OficialAprobados: 18,
+        OficialDesaprobados: 6,
+        OperativoIntentosEntregadosPendientes: 8,
+        OperativoIntentosPendientesConfirmacion: 5,
+        OperativoIntentosSinNotaFinal: 4,
+        OperativoIntentosConPreguntasSinPuntaje: 3,
+        OperativoPreguntasSinPuntaje: 6,
       }],
       overrides?.chart || [
         { Categoria: 'Aprobados', Cantidad: 156 },
@@ -401,6 +415,20 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         IntentosAprobados: 18,
         IntentosDesaprobados: 6,
         PorcentajeAprobacionIntentos: 75,
+        OficialIntentosValidosEntregados: 30,
+        OficialResultadosConsiderados: 24,
+        OficialResultadosPendientes: 6,
+        OficialIntentosPendientesConfirmacion: 4,
+        OficialIntentosConfirmadosSinNota: 2,
+        OficialIntentosConPreguntasSinPuntaje: 3,
+        OficialPreguntasSinPuntaje: 5,
+        OficialAprobados: 18,
+        OficialDesaprobados: 6,
+        OperativoIntentosEntregadosPendientes: 8,
+        OperativoIntentosPendientesConfirmacion: 5,
+        OperativoIntentosSinNotaFinal: 4,
+        OperativoIntentosConPreguntasSinPuntaje: 3,
+        OperativoPreguntasSinPuntaje: 6,
       }],
       [{ Total: overrides?.total ?? 12 }],
     ],
@@ -432,11 +460,31 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       alumnosConIncidentes: 4,
       totalIncidentes: 7,
       incidentesSinRevisar: 2,
+      resultadosOficiales: {
+        intentosValidosEntregados: 30,
+        resultadosConsiderados: 24,
+        resultadosPendientes: 6,
+        aprobados: 18,
+        desaprobados: 6,
+        porcentajeAprobacion: 75,
+        porcentajeCoberturaConfirmada: 80,
+      },
+      pendientesOperativos: {
+        intentosEntregadosPendientes: 8,
+        intentosPendientesConfirmacion: 5,
+        intentosSinNotaFinal: 4,
+        intentosConPreguntasSinPuntaje: 3,
+        preguntasSinPuntaje: 6,
+      },
     });
+    expect(res.body.data.kpis.resultadosOficiales)
+      .toEqual(res.body.data.evaluaciones[0].resultadosOficiales);
     expect(res.body.data.paginacion).toEqual({ pagina: 1, limite: 20, total: 12, totalPaginas: 1 });
     expect(reqBuilder.input).toHaveBeenCalledWith('IdDocente', 'INT', 100542);
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText).toContain('MD.IdDocente = @IdDocente');
+    expect(sqlText.indexOf('INTO #IntentosValidosOficiales'))
+      .toBeLessThan(sqlText.indexOf('CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL'));
   });
 
   it('permite al administrador consultar el alcance institucional sin filtro docente', async () => {
@@ -449,6 +497,33 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
 
     expect(res.status).toBe(200);
     expect(reqBuilder.input).not.toHaveBeenCalledWith('IdDocente', expect.anything(), expect.anything());
+  });
+
+  it('resuelve el intento válido antes de evaluar confirmación y conserva el gráfico legacy', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?idPublicacion=47')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.graficos.distribucionResultados).toEqual([
+      { categoria: 'Aprobados', cantidad: 156 },
+      { categoria: 'Desaprobados', cantidad: 54 },
+      { categoria: 'Pendientes de corrección', cantidad: 20 },
+      { categoria: 'En progreso', cantidad: 15 },
+      { categoria: 'Vencidos', cantidad: 5 },
+      { categoria: 'Anulados', cantidad: 10 },
+    ]);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    const seleccion = sqlText.indexOf('AS IdIntentoValido');
+    const evaluacionConfirmacion = sqlText.indexOf(
+      'O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL',
+    );
+    expect(seleccion).toBeGreaterThan(-1);
+    expect(evaluacionConfirmacion).toBeGreaterThan(seleccion);
+    expect(sqlText).not.toContain('CorreccionConfirmada=1\n        ORDER BY I2.FechaFin');
   });
 
   it('rechaza al rol alumno y conserva los códigos RBAC vigentes', async () => {

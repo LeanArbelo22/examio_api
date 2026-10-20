@@ -843,6 +843,14 @@ datos ni contratos. Verificación de sólo lectura:
 `scripts/verificar-indices-rendimiento-preguntas.sql`; además de estructura muestra uso
 y recomendaciones del optimizador para revisar planes con un volumen representativo.
 
+La ampliación docente v1.0.0 no agrega DDL. Calcula en paralelo la población oficial
+después de seleccionar el intento válido: entregado, `CorreccionConfirmada=1` y nota o
+puntaje definitivo según el bloque. Las presentaciones de preguntas se particionan en
+puntaje nulo, luego máximo no positivo y finalmente muestra confirmada. La evidencia de
+opciones sigue usando `IntentoPreguntaOpcionSnapshot` y, con `claveContenido`, agrega todas
+las copias de la misma identidad histórica sólo si sus formas snapshot son reconciliables.
+El contrato exacto está en `docs/CONTRATO_REPORTES_DOCENTE_V1.md`.
+
 ### 9.9 Políticas y sesiones de revisión — etapa 5
 
 DDL: `migrations/20261018_revision_examen.sql`, posterior a las migraciones de intentos

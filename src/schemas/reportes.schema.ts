@@ -14,7 +14,13 @@ const optionalBoolean = z.preprocess(
   z.boolean().optional(),
 );
 
+const optionalPercentage = z.preprocess(
+  (value) => value === undefined ? undefined : Number(value),
+  z.number().min(0).max(100).optional(),
+);
+
 export const RendimientoEvaluacionesQuerySchema = z.object({
+  idCarrera: optionalPositiveInteger,
   idMateria: optionalPositiveInteger,
   idMateriaDivision: optionalPositiveInteger,
   idActividad: optionalPositiveInteger,
@@ -30,6 +36,13 @@ export const RendimientoEvaluacionesQuerySchema = z.object({
     'sin_clasificar', 'informar', 'advertir', 'bloquear_interfaz', 'anular_intento',
   ]).optional(),
   soloIncidentesSinRevisar: optionalBoolean,
+  incluirResumenInstitucional: optionalBoolean,
+  incluirSerieMensual: optionalBoolean,
+  muestraMinimaRanking: z.preprocess(
+    (value) => value === undefined ? undefined : Number(value),
+    z.number().int().min(1).max(100000).optional(),
+  ),
+  coberturaMinimaRanking: optionalPercentage,
   pagina: z.preprocess(
     (value) => value === undefined ? 1 : Number(value),
     z.number().int().positive(),

@@ -4,6 +4,7 @@ import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
 import { RendimientoEvaluacionesQuery } from '../schemas/reportes.schema';
 
 const identifierFilters = [
+  ['idCarrera', 'C.Id = @IdCarrera'],
   ['idMateria', 'MD.IdMateria = @IdMateria'],
   ['idMateriaDivision', 'MD.Id = @IdMateriaDivision'],
   ['idActividad', 'A.Id = @IdActividad'],
@@ -11,6 +12,7 @@ const identifierFilters = [
 ] as const;
 
 const bindFilters = (request: sql.Request, filters: RendimientoEvaluacionesQuery): sql.Request => {
+  if (filters.idCarrera) request.input('IdCarrera', sql.Int, filters.idCarrera);
   if (filters.idMateria) request.input('IdMateria', sql.Int, filters.idMateria);
   if (filters.idMateriaDivision) request.input('IdMateriaDivision', sql.Int, filters.idMateriaDivision);
   if (filters.idActividad) request.input('IdActividad', sql.Int, filters.idActividad);
@@ -42,11 +44,79 @@ export const isEvaluationReportScopeAllowed = async (
     FROM Publicacion P
     INNER JOIN Actividad A ON A.Id = P.IdActividad
     INNER JOIN MateriaDivision MD ON MD.Id = P.IdMateriaDivision
+    INNER JOIN Materia M ON M.Id = MD.IdMateria
+    INNER JOIN Carrera C ON C.Id = M.IdCarrera
     WHERE A.Tipo = 'evaluacion'
       AND MD.IdDocente = @IdDocente
       ${identifierWhere(filters)}
   `);
   return result.recordset.length > 0;
+};
+
+const hierarchyKeys = [
+  'idCarrera', 'idMateria', 'idMateriaDivision', 'idActividad', 'idPublicacion',
+] as const;
+
+export const areEvaluationReportFiltersConsistent = async (
+  filters: RendimientoEvaluacionesQuery,
+): Promise<boolean> => {
+  if (hierarchyKeys.filter(key => filters[key] !== undefined).length < 2) return true;
+
+  const request = pool.request()
+    .input('IdCarrera', sql.Int, filters.idCarrera ?? null)
+    .input('IdMateria', sql.Int, filters.idMateria ?? null)
+    .input('IdMateriaDivision', sql.Int, filters.idMateriaDivision ?? null)
+    .input('IdActividad', sql.Int, filters.idActividad ?? null)
+    .input('IdPublicacion', sql.Int, filters.idPublicacion ?? null);
+  const result = await request.query(`
+    SELECT CAST(CASE WHEN
+      (@IdCarrera IS NULL OR @IdMateria IS NULL OR EXISTS (
+        SELECT 1 FROM Materia M
+        WHERE M.Id=@IdMateria AND M.IdCarrera=@IdCarrera
+      ))
+      AND (@IdMateriaDivision IS NULL OR EXISTS (
+        SELECT 1
+        FROM MateriaDivision MD
+        INNER JOIN Materia M ON M.Id=MD.IdMateria
+        WHERE MD.Id=@IdMateriaDivision
+          AND (@IdMateria IS NULL OR MD.IdMateria=@IdMateria)
+          AND (@IdCarrera IS NULL OR M.IdCarrera=@IdCarrera)
+      ))
+      AND (@IdActividad IS NULL OR NOT EXISTS (
+        SELECT 1
+        FROM (VALUES (@IdCarrera),(@IdMateria),(@IdMateriaDivision)) F(Id)
+        WHERE F.Id IS NOT NULL
+      ) OR EXISTS (
+        SELECT 1
+        FROM Publicacion P
+        INNER JOIN MateriaDivision MD ON MD.Id=P.IdMateriaDivision
+        INNER JOIN Materia M ON M.Id=MD.IdMateria
+        WHERE P.IdActividad=@IdActividad
+          AND (@IdMateriaDivision IS NULL OR MD.Id=@IdMateriaDivision)
+          AND (@IdMateria IS NULL OR M.Id=@IdMateria)
+          AND (@IdCarrera IS NULL OR M.IdCarrera=@IdCarrera)
+      ))
+      AND (@IdPublicacion IS NULL OR EXISTS (
+        SELECT 1
+        FROM Publicacion P
+        INNER JOIN MateriaDivision MD ON MD.Id=P.IdMateriaDivision
+        INNER JOIN Materia M ON M.Id=MD.IdMateria
+        WHERE P.Id=@IdPublicacion
+          AND (@IdActividad IS NULL OR P.IdActividad=@IdActividad)
+          AND (@IdMateriaDivision IS NULL OR MD.Id=@IdMateriaDivision)
+          AND (@IdMateria IS NULL OR M.Id=@IdMateria)
+          AND (@IdCarrera IS NULL OR M.IdCarrera=@IdCarrera)
+      ))
+      THEN 1 ELSE 0 END AS bit) AS Consistente;
+  `);
+  return Boolean(result.recordset[0]?.Consistente);
+};
+
+export type ReportSeriesPeriod = {
+  desde: Date;
+  hasta: Date;
+  ahora: Date;
+  mesesCalendarioIncluidos: number;
 };
 
 const orderingMap: Record<RendimientoEvaluacionesQuery['ordenarPor'], string> = {
@@ -97,9 +167,164 @@ const extraerBloquesDocentes = (source: Record<string, unknown>) => {
   return { ...clean, resultadosOficiales, pendientesOperativos };
 };
 
+type AggregateItem = ReturnType<typeof extraerBloquesDocentes>;
+type ComparisonDimension = 'carreras' | 'materias' | 'comisiones';
+
+const stableId = (item: AggregateItem, dimension: ComparisonDimension): number => {
+  if (dimension === 'carreras') return numberValue(item.idCarrera);
+  if (dimension === 'materias') return numberValue(item.idMateria);
+  return numberValue(item.idMateriaDivision);
+};
+
+const displayName = (item: AggregateItem, dimension: ComparisonDimension): string => {
+  if (dimension === 'carreras') return String(item.carrera ?? '');
+  if (dimension === 'materias') return String(item.materia ?? '');
+  return String(item.division ?? '');
+};
+
+const approvalRatio = (item: AggregateItem): number => {
+  const considered = item.resultadosOficiales.resultadosConsiderados;
+  return considered === 0 ? Number.POSITIVE_INFINITY
+    : item.resultadosOficiales.aprobados / considered;
+};
+
+const buildComparison = (
+  items: AggregateItem[],
+  dimension: ComparisonDimension,
+  minimumSample: number,
+  minimumCoverage: number,
+) => {
+  const eligible: AggregateItem[] = [];
+  const limited: Array<AggregateItem & { motivosNoElegibilidad: string[] }> = [];
+  const withoutResults: Array<AggregateItem & { motivosNoElegibilidad: string[] }> = [];
+
+  items.forEach(item => {
+    const official = item.resultadosOficiales;
+    if (official.resultadosConsiderados === 0) {
+      withoutResults.push({ ...item, motivosNoElegibilidad: ['SIN_RESULTADOS_CONFIRMADOS'] });
+      return;
+    }
+
+    const enoughSample = official.resultadosConsiderados >= minimumSample;
+    const enoughCoverage = official.intentosValidosEntregados > 0 &&
+      official.resultadosConsiderados * 100 >= minimumCoverage * official.intentosValidosEntregados;
+    if (enoughSample && enoughCoverage) {
+      eligible.push(item);
+      return;
+    }
+
+    const reasons: string[] = [];
+    if (!enoughSample) reasons.push('MUESTRA_INSUFICIENTE');
+    if (!enoughCoverage) reasons.push('COBERTURA_INSUFICIENTE');
+    limited.push({ ...item, motivosNoElegibilidad: reasons });
+  });
+
+  eligible.sort((left, right) =>
+    approvalRatio(left) - approvalRatio(right) ||
+    right.resultadosOficiales.resultadosConsiderados -
+      left.resultadosOficiales.resultadosConsiderados ||
+    stableId(left, dimension) - stableId(right, dimension));
+  limited.sort((left, right) =>
+    right.resultadosOficiales.resultadosConsiderados -
+      left.resultadosOficiales.resultadosConsiderados ||
+    (right.resultadosOficiales.porcentajeCoberturaConfirmada ?? -1) -
+      (left.resultadosOficiales.porcentajeCoberturaConfirmada ?? -1) ||
+    stableId(left, dimension) - stableId(right, dimension));
+  withoutResults.sort((left, right) =>
+    displayName(left, dimension).localeCompare(displayName(right, dimension), 'es') ||
+    stableId(left, dimension) - stableId(right, dimension));
+
+  return {
+    elegibles: eligible.map((item, index) => ({ ...item, posicion: index + 1 })),
+    evidenciaLimitada: limited,
+    sinResultados: withoutResults,
+  };
+};
+
+const REPORT_TIME_ZONE = 'America/Argentina/Buenos_Aires';
+
+const monthParts = (value: Date): { year: number; month: number } => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: REPORT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(value);
+  return {
+    year: Number(parts.find(part => part.type === 'year')?.value),
+    month: Number(parts.find(part => part.type === 'month')?.value),
+  };
+};
+
+const monthLabels = (period: ReportSeriesPeriod): string[] => {
+  const start = monthParts(period.desde);
+  return Array.from({ length: period.mesesCalendarioIncluidos }, (_, index) => {
+    const date = new Date(Date.UTC(start.year, start.month - 1 + index, 1));
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  });
+};
+
+const timeZoneOffsetMs = (value: Date): number => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: REPORT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find(candidate => candidate.type === type)?.value);
+  const representedAsUtc = Date.UTC(
+    part('year'), part('month') - 1, part('day'),
+    part('hour'), part('minute'), part('second'),
+  );
+  return representedAsUtc - value.getTime();
+};
+
+const localMonthBoundaryUtc = (year: number, zeroBasedMonth: number): number => {
+  const nominalUtc = Date.UTC(year, zeroBasedMonth, 1);
+  let candidate = nominalUtc - timeZoneOffsetMs(new Date(nominalUtc));
+  candidate = nominalUtc - timeZoneOffsetMs(new Date(candidate));
+  return candidate;
+};
+
+const isFullMonth = (label: string, period: ReportSeriesPeriod): boolean => {
+  const [year, month] = label.split('-').map(Number);
+  const startUtc = localMonthBoundaryUtc(year, month - 1);
+  const nextUtc = localMonthBoundaryUtc(year, month);
+  return period.desde.getTime() <= startUtc &&
+    period.hasta.getTime() >= nextUtc - 1 &&
+    period.ahora.getTime() >= nextUtc;
+};
+
+const buildMonthlySeries = (
+  rows: Array<Record<string, unknown>>,
+  period: ReportSeriesPeriod,
+) => {
+  const byPeriod = new Map(
+    (mapKeysToCamelCase(rows) as Array<Record<string, unknown>>)
+      .map(row => [String(row.periodo), row] as const),
+  );
+  return monthLabels(period).map(periodLabel => {
+    const source = byPeriod.get(periodLabel) || {};
+    const aggregate = extraerBloquesDocentes(source);
+    return {
+      periodo: periodLabel,
+      periodoCompleto: isFullMonth(periodLabel, period),
+      publicaciones: numberValue(aggregate.publicaciones),
+      publicacionesConResultadosPendientes:
+        numberValue(aggregate.publicacionesConResultadosPendientes),
+      resultadosOficiales: aggregate.resultadosOficiales,
+    };
+  });
+};
+
 export const getRendimientoEvaluacionesReport = async (
   filters: RendimientoEvaluacionesQuery,
   idDocente: number | null,
+  seriesPeriod?: ReportSeriesPeriod,
 ) => {
   const request = bindFilters(pool.request(), filters)
     .input('Offset', sql.Int, (filters.pagina - 1) * filters.limite)
@@ -146,6 +371,153 @@ export const getRendimientoEvaluacionesReport = async (
     : filters.conIncidentes === false
       ? 'DELETE FROM #ReporteEvaluaciones WHERE TotalIncidentes>0;'
       : '';
+  const monthlyInstitutionalSql = filters.incluirSerieMensual === true ? `
+    SELECT
+      CONVERT(char(7),CAST(
+        FechaInicio AT TIME ZONE 'UTC' AT TIME ZONE 'Argentina Standard Time'
+        AS datetime2
+      ),120) AS Periodo,
+      COUNT(*) AS Publicaciones,
+      COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConResultadosPendientes,
+      COALESCE(SUM(OficialIntentosValidosEntregados),0) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(OficialResultadosConsiderados),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(OficialResultadosPendientes),0) AS OficialResultadosPendientes,
+      COALESCE(SUM(OficialIntentosPendientesConfirmacion),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(OficialIntentosConfirmadosSinNota),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(OficialIntentosConPreguntasSinPuntaje),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados
+    FROM #ReporteEvaluaciones
+    GROUP BY CONVERT(char(7),CAST(
+      FechaInicio AT TIME ZONE 'UTC' AT TIME ZONE 'Argentina Standard Time'
+      AS datetime2
+    ),120)
+    ORDER BY Periodo;
+  ` : '';
+  const institutionalSql = filters.incluirResumenInstitucional === true ? `
+    SELECT
+      COUNT(*) AS Publicaciones,
+      COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConResultadosPendientes,
+      COALESCE(SUM(CASE WHEN OperativoIntentosEntregadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConPendientesOperativos,
+      COALESCE(SUM(OficialIntentosValidosEntregados),0) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(OficialResultadosConsiderados),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(OficialResultadosPendientes),0) AS OficialResultadosPendientes,
+      COALESCE(SUM(OficialIntentosPendientesConfirmacion),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(OficialIntentosConfirmadosSinNota),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(OficialIntentosConPreguntasSinPuntaje),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
+        AS OperativoIntentosEntregadosPendientes,
+      COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
+        AS OperativoIntentosPendientesConfirmacion,
+      COALESCE(SUM(OperativoIntentosSinNotaFinal),0) AS OperativoIntentosSinNotaFinal,
+      COALESCE(SUM(OperativoIntentosConPreguntasSinPuntaje),0)
+        AS OperativoIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OperativoPreguntasSinPuntaje),0) AS OperativoPreguntasSinPuntaje
+    FROM #ReporteEvaluaciones;
+
+    SELECT
+      IdCarrera,Carrera,
+      COUNT(*) AS Publicaciones,
+      COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConResultadosPendientes,
+      COALESCE(SUM(CASE WHEN OperativoIntentosEntregadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConPendientesOperativos,
+      COALESCE(SUM(OficialIntentosValidosEntregados),0) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(OficialResultadosConsiderados),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(OficialResultadosPendientes),0) AS OficialResultadosPendientes,
+      COALESCE(SUM(OficialIntentosPendientesConfirmacion),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(OficialIntentosConfirmadosSinNota),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(OficialIntentosConPreguntasSinPuntaje),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
+        AS OperativoIntentosEntregadosPendientes,
+      COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
+        AS OperativoIntentosPendientesConfirmacion,
+      COALESCE(SUM(OperativoIntentosSinNotaFinal),0) AS OperativoIntentosSinNotaFinal,
+      COALESCE(SUM(OperativoIntentosConPreguntasSinPuntaje),0)
+        AS OperativoIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OperativoPreguntasSinPuntaje),0) AS OperativoPreguntasSinPuntaje
+    FROM #ReporteEvaluaciones
+    GROUP BY IdCarrera,Carrera
+    ORDER BY Carrera,IdCarrera;
+
+    SELECT
+      IdCarrera,Carrera,IdMateria,Materia,
+      COUNT(*) AS Publicaciones,
+      COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConResultadosPendientes,
+      COALESCE(SUM(CASE WHEN OperativoIntentosEntregadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConPendientesOperativos,
+      COALESCE(SUM(OficialIntentosValidosEntregados),0) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(OficialResultadosConsiderados),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(OficialResultadosPendientes),0) AS OficialResultadosPendientes,
+      COALESCE(SUM(OficialIntentosPendientesConfirmacion),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(OficialIntentosConfirmadosSinNota),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(OficialIntentosConPreguntasSinPuntaje),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
+        AS OperativoIntentosEntregadosPendientes,
+      COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
+        AS OperativoIntentosPendientesConfirmacion,
+      COALESCE(SUM(OperativoIntentosSinNotaFinal),0) AS OperativoIntentosSinNotaFinal,
+      COALESCE(SUM(OperativoIntentosConPreguntasSinPuntaje),0)
+        AS OperativoIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OperativoPreguntasSinPuntaje),0) AS OperativoPreguntasSinPuntaje
+    FROM #ReporteEvaluaciones
+    GROUP BY IdCarrera,Carrera,IdMateria,Materia
+    ORDER BY Carrera,Materia,IdMateria;
+
+    SELECT
+      IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division,
+      COUNT(*) AS Publicaciones,
+      COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConResultadosPendientes,
+      COALESCE(SUM(CASE WHEN OperativoIntentosEntregadosPendientes>0 THEN 1 ELSE 0 END),0)
+        AS PublicacionesConPendientesOperativos,
+      COALESCE(SUM(OficialIntentosValidosEntregados),0) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(OficialResultadosConsiderados),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(OficialResultadosPendientes),0) AS OficialResultadosPendientes,
+      COALESCE(SUM(OficialIntentosPendientesConfirmacion),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(OficialIntentosConfirmadosSinNota),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(OficialIntentosConPreguntasSinPuntaje),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
+        AS OperativoIntentosEntregadosPendientes,
+      COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
+        AS OperativoIntentosPendientesConfirmacion,
+      COALESCE(SUM(OperativoIntentosSinNotaFinal),0) AS OperativoIntentosSinNotaFinal,
+      COALESCE(SUM(OperativoIntentosConPreguntasSinPuntaje),0)
+        AS OperativoIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(OperativoPreguntasSinPuntaje),0) AS OperativoPreguntasSinPuntaje
+    FROM #ReporteEvaluaciones
+    GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division
+    ORDER BY Carrera,Materia,IdMateria,Division,IdMateriaDivision;
+
+    ${monthlyInstitutionalSql}
+  ` : '';
 
   const result = await request.query(`
     SET NOCOUNT ON;
@@ -156,6 +528,8 @@ export const getRendimientoEvaluacionesReport = async (
       A.Titulo,
       MD.IdMateria,
       M.Nombre AS Materia,
+      C.Id AS IdCarrera,
+      C.Nombre AS Carrera,
       MD.Id AS IdMateriaDivision,
       D.Descripcion AS Division,
       P.FechaInicio,
@@ -168,6 +542,7 @@ export const getRendimientoEvaluacionesReport = async (
     INNER JOIN Actividad A ON A.Id = P.IdActividad
     INNER JOIN MateriaDivision MD ON MD.Id = P.IdMateriaDivision
     INNER JOIN Materia M ON M.Id = MD.IdMateria
+    INNER JOIN Carrera C ON C.Id = M.IdCarrera
     INNER JOIN Division D ON D.Id = MD.IdDivision
     WHERE A.Tipo = 'evaluacion'
       ${scopeClause}
@@ -433,12 +808,16 @@ export const getRendimientoEvaluacionesReport = async (
     WHERE EXISTS (SELECT 1 FROM #ReporteEvaluaciones)
     ORDER BY Orden;
 
+    ${institutionalSql}
+
     SELECT
       IdPublicacion,
       IdActividad,
       Titulo,
       IdMateria,
       Materia,
+      IdCarrera,
+      Carrera,
       IdMateriaDivision,
       Division,
       FechaInicio,
@@ -490,7 +869,69 @@ export const getRendimientoEvaluacionesReport = async (
     SELECT COUNT(*) AS Total FROM #ReporteEvaluaciones;
   `);
 
-  const [kpiRows = [], chartRows = [], evaluationRows = [], totalRows = []] = result.recordsets || [];
+  const recordsets = result.recordsets || [];
+  const kpiRows = recordsets[0] || [];
+  const chartRows = recordsets[1] || [];
+  let evaluationIndex = 2;
+  let resumenInstitucional: Record<string, unknown> | undefined;
+  if (filters.incluirResumenInstitucional === true) {
+    const globalRows = recordsets[2] || [];
+    const carreraRows = recordsets[3] || [];
+    const materiaRows = recordsets[4] || [];
+    const comisionRows = recordsets[5] || [];
+    const monthlyRows = filters.incluirSerieMensual === true ? recordsets[6] || [] : [];
+    evaluationIndex = filters.incluirSerieMensual === true ? 7 : 6;
+    const comisiones = (mapKeysToCamelCase(comisionRows) as Array<Record<string, unknown>>)
+      .map(extraerBloquesDocentes);
+    const materias = (mapKeysToCamelCase(materiaRows) as Array<Record<string, unknown>>)
+      .map(extraerBloquesDocentes)
+      .map(materia => ({
+        ...materia,
+        comisiones: comisiones.filter(comision =>
+          Number(comision.idCarrera) === Number(materia.idCarrera) &&
+          Number(comision.idMateria) === Number(materia.idMateria)),
+      }));
+    const carrerasBase = (mapKeysToCamelCase(carreraRows) as Array<Record<string, unknown>>)
+      .map(extraerBloquesDocentes);
+    const carreras = carrerasBase.map(carrera => ({
+      ...carrera,
+      materias: materias.filter(materia =>
+        Number(materia.idCarrera) === Number(carrera.idCarrera)),
+    }));
+    const minimumSample = filters.muestraMinimaRanking ?? 10;
+    const minimumCoverage = filters.coberturaMinimaRanking ?? 70;
+    resumenInstitucional = {
+      unidadEvaluacion: 'idPublicacion',
+      dimensionTemporal: 'publicacion.fechaInicio',
+      global: extraerBloquesDocentes(
+        mapKeysToCamelCase(globalRows[0] || {}) as Record<string, unknown>,
+      ),
+      materias,
+      carreras,
+      comparativas: {
+        criteriosElegibilidad: {
+          muestraMinima: minimumSample,
+          coberturaMinimaPorcentaje: minimumCoverage,
+          naturaleza: 'criterio_operativo_configurable',
+        },
+        carreras: buildComparison(carrerasBase, 'carreras', minimumSample, minimumCoverage),
+        materias: buildComparison(materias.map(({ comisiones: _comisiones, ...materia }) => materia),
+          'materias', minimumSample, minimumCoverage),
+        comisiones: buildComparison(comisiones, 'comisiones', minimumSample, minimumCoverage),
+      },
+      ...(filters.incluirSerieMensual === true && seriesPeriod ? {
+        periodoEfectivo: {
+          desde: seriesPeriod.desde.toISOString(),
+          hasta: seriesPeriod.hasta.toISOString(),
+          zonaHoraria: REPORT_TIME_ZONE,
+          mesesCalendarioIncluidos: seriesPeriod.mesesCalendarioIncluidos,
+        },
+        serieMensual: buildMonthlySeries(monthlyRows, seriesPeriod),
+      } : {}),
+    };
+  }
+  const evaluationRows = recordsets[evaluationIndex] || [];
+  const totalRows = recordsets[evaluationIndex + 1] || [];
   const total = Number(totalRows[0]?.Total || 0);
   const kpis = extraerBloquesDocentes(
     mapKeysToCamelCase(kpiRows[0] || {}) as Record<string, unknown>,
@@ -508,10 +949,22 @@ export const getRendimientoEvaluacionesReport = async (
       tipoIncidente: filters.tipoIncidente ?? null,
       severidad: filters.severidad ?? null,
       soloIncidentesSinRevisar: filters.soloIncidentesSinRevisar ?? null,
+      ...(filters.idCarrera !== undefined ? { idCarrera: filters.idCarrera } : {}),
+      ...(filters.incluirResumenInstitucional !== undefined
+        ? { incluirResumenInstitucional: filters.incluirResumenInstitucional }
+        : {}),
+      ...(filters.incluirSerieMensual !== undefined
+        ? { incluirSerieMensual: filters.incluirSerieMensual }
+        : {}),
+      ...(filters.incluirResumenInstitucional === true ? {
+        muestraMinimaRanking: filters.muestraMinimaRanking ?? 10,
+        coberturaMinimaRanking: filters.coberturaMinimaRanking ?? 70,
+      } : {}),
     },
     kpis,
     graficos: { distribucionResultados },
     evaluaciones,
+    ...(resumenInstitucional ? { resumenInstitucional } : {}),
     paginacion: {
       pagina: filters.pagina,
       limite: filters.limite,

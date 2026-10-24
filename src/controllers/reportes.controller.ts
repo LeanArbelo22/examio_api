@@ -10,8 +10,10 @@ import {
   RendimientoPreguntasQuerySchema,
 } from '../schemas/reportes.schema';
 import {
+  areEvaluationReportFiltersConsistent,
   getRendimientoEvaluacionesReport,
   isEvaluationReportScopeAllowed,
+  ReportSeriesPeriod,
 } from '../services/reportes-evaluaciones.service';
 import {
   getRendimientoGruposReport,
@@ -163,9 +165,49 @@ const alcanceAcademico = (alcance: string): string => alcance === 'validos'
   ? "I.Id IS NOT NULL AND I.Estado='entregado' AND I.Id=IVS.IdIntentoValido"
   : "I.Id IS NOT NULL AND I.Estado='entregado'";
 
+const INSTITUTIONAL_TIME_ZONE = 'America/Argentina/Buenos_Aires';
+
+const institutionalMonth = (date: Date): { year: number; month: number } => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: INSTITUTIONAL_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(date);
+  return {
+    year: Number(parts.find(part => part.type === 'year')?.value),
+    month: Number(parts.find(part => part.type === 'month')?.value),
+  };
+};
+
+const institutionalMonthCount = (from: Date, to: Date): number => {
+  const start = institutionalMonth(from);
+  const end = institutionalMonth(to);
+  return (end.year - start.year) * 12 + end.month - start.month + 1;
+};
+
+const seriesError = (res: Response, code: string, message: string) =>
+  res.status(400).json({ success: false, code, message });
+
 export const getRendimientoEvaluaciones = async (req: Request, res: Response) => {
   const parsed = RendimientoEvaluacionesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
+    if (req.query.incluirSerieMensual === 'true') {
+      if (req.query.fechaDesde === undefined || req.query.fechaHasta === undefined) {
+        return seriesError(
+          res,
+          'REPORT_SERIES_PERIOD_REQUIRED',
+          'La serie mensual requiere fechaDesde y fechaHasta',
+        );
+      }
+      if (parsed.error.issues.some(issue =>
+        issue.path[0] === 'fechaDesde' || issue.path[0] === 'fechaHasta')) {
+        return seriesError(
+          res,
+          'REPORT_SERIES_PERIOD_INVALID',
+          'El período de la serie mensual no es válido',
+        );
+      }
+    }
     return res.status(400).json({
       success: false,
       message: 'Filtros inválidos',
@@ -176,6 +218,71 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
 
   try {
     const user = (req as any).user;
+    const requestNow = new Date();
+    const hasInstitutionalOptions = parsed.data.incluirSerieMensual === true ||
+      parsed.data.muestraMinimaRanking !== undefined ||
+      parsed.data.coberturaMinimaRanking !== undefined;
+    if (hasInstitutionalOptions && parsed.data.incluirResumenInstitucional !== true) {
+      return seriesError(
+        res,
+        'REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY',
+        'Las opciones institucionales requieren incluirResumenInstitucional=true',
+      );
+    }
+    if (parsed.data.incluirResumenInstitucional === true && user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'El resumen institucional requiere rol administrador',
+        code: 'REPORT_SCOPE_FORBIDDEN',
+      });
+    }
+    let seriesPeriod: ReportSeriesPeriod | undefined;
+    let effectiveFilters = parsed.data;
+    if (parsed.data.incluirSerieMensual === true) {
+      if (!parsed.data.fechaDesde || !parsed.data.fechaHasta) {
+        return seriesError(
+          res,
+          'REPORT_SERIES_PERIOD_REQUIRED',
+          'La serie mensual requiere fechaDesde y fechaHasta',
+        );
+      }
+      const requestedFrom = new Date(parsed.data.fechaDesde);
+      const requestedTo = new Date(parsed.data.fechaHasta);
+      const effectiveTo = requestedTo.getTime() > requestNow.getTime() ? requestNow : requestedTo;
+      if (requestedFrom.getTime() > effectiveTo.getTime()) {
+        return seriesError(
+          res,
+          'REPORT_SERIES_PERIOD_INVALID',
+          'El período efectivo de la serie mensual no es válido',
+        );
+      }
+      const includedMonths = institutionalMonthCount(requestedFrom, effectiveTo);
+      if (includedMonths > 60) {
+        return seriesError(
+          res,
+          'REPORT_SERIES_RANGE_TOO_LARGE',
+          'La serie mensual admite hasta 60 meses calendario',
+        );
+      }
+      seriesPeriod = {
+        desde: requestedFrom,
+        hasta: effectiveTo,
+        ahora: requestNow,
+        mesesCalendarioIncluidos: includedMonths,
+      };
+      effectiveFilters = { ...parsed.data, fechaHasta: effectiveTo.toISOString() };
+    }
+
+    if (effectiveFilters.incluirResumenInstitucional === true) {
+      const consistent = await areEvaluationReportFiltersConsistent(effectiveFilters);
+      if (!consistent) {
+        return seriesError(
+          res,
+          'REPORT_FILTERS_INCONSISTENT',
+          'Los filtros académicos no pertenecen a la misma jerarquía',
+        );
+      }
+    }
     const idDocente = user.role === 'docente' ? Number(user.idDocente) : null;
     if (user.role === 'docente' && (!Number.isInteger(idDocente) || idDocente <= 0)) {
       return res.status(403).json({
@@ -186,7 +293,7 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
     }
 
     if (idDocente !== null) {
-      const allowed = await isEvaluationReportScopeAllowed(idDocente, parsed.data);
+      const allowed = await isEvaluationReportScopeAllowed(idDocente, effectiveFilters);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -196,7 +303,11 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
       }
     }
 
-    const data = await getRendimientoEvaluacionesReport(parsed.data, idDocente);
+    const data = await getRendimientoEvaluacionesReport(
+      effectiveFilters,
+      idDocente,
+      seriesPeriod,
+    );
     return res.json({ success: true, data });
   } catch {
     return res.status(500).json({

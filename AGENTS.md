@@ -99,7 +99,7 @@ Para modificar un módulo, empezar por route, controller, schema y test homónim
 | Telemetría | Navegación, eventos temporales e incidentes con duración y revisión operativa | archivos `telemetria.*`, `incidentes.*`, services `telemetria-*`, `visibilidad-incidentes.service.ts` | UUID + sesión/secuencia idempotentes; las consecuencias se delegan a Supervisión |
 | Supervisión | Políticas, snapshots, decisiones y overrides sobre incidentes | archivos `supervision.*`, `supervision.service.ts` | Consecuencias sólo tras evaluación autoritativa; `temporal-v1` es el default |
 | Usuarios | Cuentas, hashes, roles y activación | archivos `usuarios.*` | Integridad cruzada con Alumno/Docente |
-| Reportes | Rendimiento por alumno, evaluación, pregunta, variante, grupo y opción | archivos `reportes.*`, `reportes-preguntas.service.ts` | Limita docentes por `idDocente` del JWT; agregados globales separados de la página |
+| Reportes | Rendimiento por alumno, evaluación, pregunta, variante, grupo y opción; síntesis institucional por carrera/materia/comisión | archivos `reportes.*`, services `reportes-*` | Limita docentes por `idDocente` del JWT; resumen institucional sólo admin; jerarquía, comparativas y serie se calculan antes de paginar |
 
 El catálogo completo y actualizado de endpoints está en `README.md`.
 
@@ -219,7 +219,8 @@ Convenciones:
   procesos ajenos.
 - Tests importan `src/app.ts`; Jest finaliza naturalmente y deja 55803 libre.
 - Módulo de reportes agregado: rendimiento individual/listado, filtros,
-  paginación y alcance docente.
+  paginación, alcance docente y síntesis institucional administrativa por
+  carrera/materia/comisión, con comparativas y serie mensual en v1.2.0.
 - Borradores incompletos, publicación completa, referencias al banco e idempotencia
   persistente requieren la migración `20260926_evaluacion_revision_idempotencia.sql`.
 - La migración `20261011_calificacion_intentos_telemetria.sql` fue aplicada dos veces y

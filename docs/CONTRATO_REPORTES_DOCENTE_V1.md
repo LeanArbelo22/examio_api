@@ -1,11 +1,12 @@
-# Contrato de reportes docentes v1.0.0
+# Contrato de reportes docentes e institucionales v1.1.0
 
-**Estado:** acordado e implementado para la Entrega 1  
-**Fecha:** 2026-10-19  
+**Estado:** acordado e implementado para las Entregas 1 y 2
+
+**Fecha:** 2026-10-21
 **Unidad de evaluación:** `idPublicacion`
 
-Este documento fija las ampliaciones aditivas de los reportes docentes. No cambia
-los campos legacy ni define el resumen institucional de la Entrega 2.
+Este documento fija las ampliaciones aditivas de los reportes docentes y el resumen
+institucional administrativo. No cambia los campos legacy.
 
 ## Criterios comunes
 
@@ -72,6 +73,128 @@ consulta una sola publicación, ambos objetos coinciden:
 `pendientesOperativos` observa todos los intentos entregados. Sus categorías pueden
 superponerse. `intentosEntregadosPendientes` es la unión de IDs de intento distintos;
 los subconjuntos no deben sumarse.
+
+### Resumen institucional administrativo
+
+`incluirResumenInstitucional=true` agrega `data.resumenInstitucional`. Sólo puede
+solicitarlo un administrador; un docente recibe `403 REPORT_SCOPE_FORBIDDEN` y un
+alumno continúa recibiendo `403 FORBIDDEN`. Si el parámetro se omite o es `false`,
+el bloque no se incluye y el contrato docente conserva su forma anterior.
+
+El resumen se calcula después de RBAC y de todos los filtros de publicaciones, pero
+antes de paginar `evaluaciones`. Su unidad es `idPublicacion` y `fechaDesde`/
+`fechaHasta` continúan filtrando `Publicacion.FechaInicio`. Cada resultado representa
+el par alumno/publicación: un alumno que rindió publicaciones diferentes aporta un
+resultado en cada una.
+
+```json
+{
+  "resumenInstitucional": {
+    "unidadEvaluacion": "idPublicacion",
+    "dimensionTemporal": "publicacion.fechaInicio",
+    "global": {
+      "publicaciones": 2,
+      "publicacionesConResultadosPendientes": 1,
+      "publicacionesConPendientesOperativos": 1,
+      "resultadosOficiales": {
+        "intentosValidosEntregados": 40,
+        "resultadosConsiderados": 39,
+        "resultadosPendientes": 1,
+        "intentosPendientesConfirmacion": 1,
+        "intentosConfirmadosSinNota": 0,
+        "intentosConPreguntasSinPuntaje": 0,
+        "preguntasSinPuntaje": 0,
+        "aprobados": 27,
+        "desaprobados": 12,
+        "porcentajeAprobacion": 69.23,
+        "porcentajeCoberturaConfirmada": 97.5
+      },
+      "pendientesOperativos": {
+        "intentosEntregadosPendientes": 1,
+        "intentosPendientesConfirmacion": 1,
+        "intentosSinNotaFinal": 0,
+        "intentosConPreguntasSinPuntaje": 0,
+        "preguntasSinPuntaje": 0
+      }
+    },
+    "materias": [
+      {
+        "idCarrera": 7,
+        "carrera": "Tecnicatura Superior en Ciberseguridad y Redes",
+        "idMateria": 25,
+        "materia": "Respuesta a Incidentes y Análisis Forense",
+        "publicaciones": 2,
+        "publicacionesConResultadosPendientes": 1,
+        "publicacionesConPendientesOperativos": 1,
+        "resultadosOficiales": {
+          "intentosValidosEntregados": 40,
+          "resultadosConsiderados": 39,
+          "resultadosPendientes": 1,
+          "intentosPendientesConfirmacion": 1,
+          "intentosConfirmadosSinNota": 0,
+          "intentosConPreguntasSinPuntaje": 0,
+          "preguntasSinPuntaje": 0,
+          "aprobados": 27,
+          "desaprobados": 12,
+          "porcentajeAprobacion": 69.23,
+          "porcentajeCoberturaConfirmada": 97.5
+        },
+        "pendientesOperativos": {
+          "intentosEntregadosPendientes": 1,
+          "intentosPendientesConfirmacion": 1,
+          "intentosSinNotaFinal": 0,
+          "intentosConPreguntasSinPuntaje": 0,
+          "preguntasSinPuntaje": 0
+        },
+        "comisiones": [
+          {
+            "idCarrera": 7,
+            "carrera": "Tecnicatura Superior en Ciberseguridad y Redes",
+            "idMateria": 25,
+            "materia": "Respuesta a Incidentes y Análisis Forense",
+            "idMateriaDivision": 32,
+            "division": "1NMS",
+            "publicaciones": 2,
+            "publicacionesConResultadosPendientes": 1,
+            "publicacionesConPendientesOperativos": 1,
+            "resultadosOficiales": {
+              "intentosValidosEntregados": 40,
+              "resultadosConsiderados": 39,
+              "resultadosPendientes": 1,
+              "intentosPendientesConfirmacion": 1,
+              "intentosConfirmadosSinNota": 0,
+              "intentosConPreguntasSinPuntaje": 0,
+              "preguntasSinPuntaje": 0,
+              "aprobados": 27,
+              "desaprobados": 12,
+              "porcentajeAprobacion": 69.23,
+              "porcentajeCoberturaConfirmada": 97.5
+            },
+            "pendientesOperativos": {
+              "intentosEntregadosPendientes": 1,
+              "intentosPendientesConfirmacion": 1,
+              "intentosSinNotaFinal": 0,
+              "intentosConPreguntasSinPuntaje": 0,
+              "preguntasSinPuntaje": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`resultadosOficiales` y `pendientesOperativos` tienen exactamente los mismos campos
+en global, materia, comisión, KPIs y publicaciones. Los porcentajes se recalculan
+desde las sumas de sus numeradores y denominadores; nunca se promedian porcentajes.
+Sin denominador son `null`. Las materias se identifican por `idMateria` y
+`idCarrera`, no por nombre; las comisiones, por `idMateriaDivision`.
+
+`publicacionesConResultadosPendientes` cuenta publicaciones cuyo intento válido
+vigente tiene algún resultado académico pendiente. `publicacionesConPendientesOperativos`
+cuenta publicaciones con al menos un intento entregado pendiente entre todos sus
+intentos. Son dimensiones diferentes y no deben sumarse.
 
 ## GET /api/reportes/rendimiento-preguntas
 
@@ -191,6 +314,6 @@ Los errores no exponen SQL ni amplían el alcance autorizado.
 
 ## Fuera de alcance
 
-No incluye `resumenInstitucional`, agrupaciones administrativas, series, nuevos
-endpoints, cambios de notas/corrección/intento válido ni migraciones. Esos cambios
-pertenecen a la Entrega 2 o a mejoras opcionales posteriores.
+No incluye cola administrativa de corrección, escrituras administrativas,
+comparaciones entre períodos, clasificaciones automáticas, series, nuevos endpoints,
+cambios de notas/corrección/intento válido ni migraciones.

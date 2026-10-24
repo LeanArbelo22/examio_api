@@ -1928,6 +1928,7 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 
 | Parámetro | Tipo/default | Regla |
 |---|---|---|
+| `idCarrera` | entero positivo | Carrera real de la materia |
 | `idMateria` | entero positivo | Materia de la comisión |
 | `idMateriaDivision` | entero positivo | Comisión exacta |
 | `idActividad` | entero positivo | Actividad base |
@@ -1941,6 +1942,10 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 | `tipoIncidente` | string | Tipo exacto del catálogo de telemetría |
 | `severidad` | enum | `sin_clasificar`, `informar`, `advertir`, `bloquear_interfaz` o `anular_intento` |
 | `soloIncidentesSinRevisar` | boolean | Con `true`, limita el alcance a incidentes operativamente pendientes |
+| `incluirResumenInstitucional` | boolean, default `false` | Sólo `admin`; agrega jerarquía y comparativas institucionales |
+| `incluirSerieMensual` | boolean, default `false` | Requiere resumen, `fechaDesde` y `fechaHasta`; máximo 60 meses calendario |
+| `muestraMinimaRanking` | entero, default `10` | Elegibilidad comparativa; entre 1 y 100000 |
+| `coberturaMinimaRanking` | decimal, default `70` | Elegibilidad comparativa; entre 0 y 100 |
 | `pagina` | entero, default `1` | Mínimo 1 |
 | `limite` | entero, default `20` | Entre 1 y 100 |
 | `ordenarPor` | enum, default `fecha` | `evaluacion`, `fecha`, `promedio`, `entregados`, `aprobacion`, `pendientesCorreccion` |
@@ -1956,11 +1961,14 @@ ser `YYYY-MM-DD` o timestamps ISO 8601; `fechaDesde` no puede superar
 - `docente` usa exclusivamente `idDocente` del access token y sólo consulta
   `MateriaDivision.IdDocente = idDocente`.
 - No se acepta identidad docente desde query string.
-- Si un docente especifica materia, comisión, actividad o publicación que no
+- Si un docente especifica carrera, materia, comisión, actividad o publicación que no
   coincide con una publicación de evaluación de su alcance, recibe
   `403 REPORT_SCOPE_FORBIDDEN`. La respuesta no distingue recurso inexistente de
   recurso ajeno.
 - `alumno` recibe `403 FORBIDDEN`.
+- `incluirResumenInstitucional=true` es exclusivo de `admin`; un docente recibe
+  `403 REPORT_SCOPE_FORBIDDEN`. Omitirlo o enviarlo en `false` conserva la respuesta
+  compatible sin el bloque institucional.
 
 #### Reglas de cálculo
 
@@ -2011,6 +2019,31 @@ intentos `entregado`; las restantes corresponden directamente al estado.
 El filtro `conPendientesCorreccion` se aplica antes de calcular KPIs, gráficos,
 total y página. Por lo tanto, todos esos bloques describen exactamente el mismo
 conjunto de evaluaciones filtradas.
+
+Con `incluirResumenInstitucional=true`, `data.resumenInstitucional` contiene
+`global`, la jerarquía canónica `carreras[].materias[].comisiones[]`, el alias
+compatible `materias[].comisiones[]` y `comparativas`. Todos los niveles reutilizan exactamente los
+tipos `resultadosOficiales` y `pendientesOperativos`, e incluyen cantidad de
+publicaciones con pendientes académicos y operativos. Materias y comisiones se
+identifican por `idMateria`, `idMateriaDivision` e `idCarrera`; `carrera` se obtiene
+de la relación `Materia -> Carrera`. Los porcentajes se calculan desde numeradores y
+denominadores agregados y son `null` sin denominador. El resumen usa todo el conjunto
+filtrado antes de paginar y conserva `Publicacion.FechaInicio` como dimensión temporal.
+
+`comparativas` devuelve carreras, materias y comisiones completas, separadas en
+`elegibles`, `evidenciaLimitada` y `sinResultados`. El criterio configurable inicial
+es muestra mínima 10 y cobertura confirmada mínima 70%. Las posiciones describen
+menor aprobación observada; no constituyen una clasificación pedagógica.
+
+`incluirSerieMensual=true` agrega `periodoEfectivo` y `serieMensual`. Requiere ambas
+fechas, usa `America/Argentina/Buenos_Aires`, limita el final al instante actual y
+admite hasta 60 meses calendario incluidos. Cada mes reutiliza
+`resultadosOficiales`, marca `periodoCompleto` y diferencia ausencia de resultados
+(`porcentajeAprobacion: null`) de aprobación real cero. Errores estables:
+`REPORT_SERIES_PERIOD_REQUIRED`, `REPORT_SERIES_PERIOD_INVALID` y
+`REPORT_SERIES_RANGE_TOO_LARGE`. Opciones institucionales sin resumen devuelven
+`REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY`; IDs jerárquicos incompatibles,
+`REPORT_FILTERS_INCONSISTENT`.
 
 #### Response
 
@@ -2271,10 +2304,12 @@ Todos son opcionales y se combinan con AND: `idMateria`, `idMateriaDivision`,
 `ordenarPor` y `ordenDireccion`. `rendimiento-preguntas` admite además `idPregunta`;
 el detalle de opciones recibe ese ID exclusivamente en el path.
 
-La ampliación docente acordada está versionada como **v1.0.0** en
+El contrato docente e institucional base está versionado como **v1.1.0** en
 [`docs/CONTRATO_REPORTES_DOCENTE_V1.md`](docs/CONTRATO_REPORTES_DOCENTE_V1.md).
 Documenta los bloques oficiales paralelos, hallazgos, muestras/exclusiones y evidencia
-exacta por `claveContenido`. No incluye todavía el resumen institucional.
+exacta por `claveContenido`, además del resumen administrativo por materia y comisión.
+La síntesis institucional ampliada está versionada como **v1.2.0** en
+[`docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_2.md`](docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_2.md).
 
 - `estadoIntento`: `en_progreso|entregado|vencido|anulado`.
 - `alcanceIntentos`: `todos` (default) o `validos`. El segundo usa el override manual

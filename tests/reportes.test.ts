@@ -344,6 +344,13 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     chart?: Record<string, unknown>[];
     rows?: Record<string, unknown>[];
     total?: number;
+    institutional?: {
+      global: Record<string, unknown>;
+      carreras: Record<string, unknown>[];
+      materias: Record<string, unknown>[];
+      comisiones: Record<string, unknown>[];
+      meses?: Record<string, unknown>[];
+    };
   }) => ({
     recordsets: [
       [overrides?.kpis || {
@@ -386,6 +393,13 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         { Categoria: 'Vencidos', Cantidad: 5 },
         { Categoria: 'Anulados', Cantidad: 10 },
       ],
+      ...(overrides?.institutional ? [
+        [overrides.institutional.global],
+        overrides.institutional.carreras,
+        overrides.institutional.materias,
+        overrides.institutional.comisiones,
+        ...(overrides.institutional.meses ? [overrides.institutional.meses] : []),
+      ] : []),
       overrides?.rows || [{
         IdPublicacion: 47,
         IdActividad: 18,
@@ -433,6 +447,184 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       [{ Total: overrides?.total ?? 12 }],
     ],
     recordset: [],
+  });
+
+  const institucional = {
+    global: {
+      Publicaciones: 3,
+      PublicacionesConResultadosPendientes: 2,
+      PublicacionesConPendientesOperativos: 2,
+      OficialIntentosValidosEntregados: 30,
+      OficialResultadosConsiderados: 24,
+      OficialResultadosPendientes: 6,
+      OficialIntentosPendientesConfirmacion: 4,
+      OficialIntentosConfirmadosSinNota: 2,
+      OficialIntentosConPreguntasSinPuntaje: 3,
+      OficialPreguntasSinPuntaje: 5,
+      OficialAprobados: 18,
+      OficialDesaprobados: 6,
+      OperativoIntentosEntregadosPendientes: 8,
+      OperativoIntentosPendientesConfirmacion: 5,
+      OperativoIntentosSinNotaFinal: 4,
+      OperativoIntentosConPreguntasSinPuntaje: 3,
+      OperativoPreguntasSinPuntaje: 6,
+    },
+    carreras: [{
+      IdCarrera: 1,
+      Carrera: 'Carrera Norte',
+      Publicaciones: 2,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 20,
+      OficialResultadosConsiderados: 16,
+      OficialResultadosPendientes: 4,
+      OficialIntentosPendientesConfirmacion: 3,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 2,
+      OficialPreguntasSinPuntaje: 3,
+      OficialAprobados: 12,
+      OficialDesaprobados: 4,
+      OperativoIntentosEntregadosPendientes: 5,
+      OperativoIntentosPendientesConfirmacion: 3,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 2,
+      OperativoPreguntasSinPuntaje: 4,
+    }, {
+      IdCarrera: 2,
+      Carrera: 'Carrera Sur',
+      Publicaciones: 1,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 10,
+      OficialResultadosConsiderados: 8,
+      OficialResultadosPendientes: 2,
+      OficialIntentosPendientesConfirmacion: 1,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 1,
+      OficialPreguntasSinPuntaje: 2,
+      OficialAprobados: 6,
+      OficialDesaprobados: 2,
+      OperativoIntentosEntregadosPendientes: 3,
+      OperativoIntentosPendientesConfirmacion: 2,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 1,
+      OperativoPreguntasSinPuntaje: 2,
+    }],
+    materias: [{
+      IdCarrera: 1,
+      Carrera: 'Carrera Norte',
+      IdMateria: 5,
+      Materia: 'Bases de Datos',
+      Publicaciones: 2,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 20,
+      OficialResultadosConsiderados: 16,
+      OficialResultadosPendientes: 4,
+      OficialIntentosPendientesConfirmacion: 3,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 2,
+      OficialPreguntasSinPuntaje: 3,
+      OficialAprobados: 12,
+      OficialDesaprobados: 4,
+      OperativoIntentosEntregadosPendientes: 5,
+      OperativoIntentosPendientesConfirmacion: 3,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 2,
+      OperativoPreguntasSinPuntaje: 4,
+    }, {
+      IdCarrera: 2,
+      Carrera: 'Carrera Sur',
+      IdMateria: 9,
+      Materia: 'Bases de Datos',
+      Publicaciones: 1,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 10,
+      OficialResultadosConsiderados: 8,
+      OficialResultadosPendientes: 2,
+      OficialIntentosPendientesConfirmacion: 1,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 1,
+      OficialPreguntasSinPuntaje: 2,
+      OficialAprobados: 6,
+      OficialDesaprobados: 2,
+      OperativoIntentosEntregadosPendientes: 3,
+      OperativoIntentosPendientesConfirmacion: 2,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 1,
+      OperativoPreguntasSinPuntaje: 2,
+    }],
+    comisiones: [{
+      IdCarrera: 1,
+      Carrera: 'Carrera Norte',
+      IdMateria: 5,
+      Materia: 'Bases de Datos',
+      IdMateriaDivision: 12,
+      Division: '2A',
+      Publicaciones: 2,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 20,
+      OficialResultadosConsiderados: 16,
+      OficialResultadosPendientes: 4,
+      OficialIntentosPendientesConfirmacion: 3,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 2,
+      OficialPreguntasSinPuntaje: 3,
+      OficialAprobados: 12,
+      OficialDesaprobados: 4,
+      OperativoIntentosEntregadosPendientes: 5,
+      OperativoIntentosPendientesConfirmacion: 3,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 2,
+      OperativoPreguntasSinPuntaje: 4,
+    }, {
+      IdCarrera: 2,
+      Carrera: 'Carrera Sur',
+      IdMateria: 9,
+      Materia: 'Bases de Datos',
+      IdMateriaDivision: 23,
+      Division: '3B',
+      Publicaciones: 1,
+      PublicacionesConResultadosPendientes: 1,
+      PublicacionesConPendientesOperativos: 1,
+      OficialIntentosValidosEntregados: 10,
+      OficialResultadosConsiderados: 8,
+      OficialResultadosPendientes: 2,
+      OficialIntentosPendientesConfirmacion: 1,
+      OficialIntentosConfirmadosSinNota: 1,
+      OficialIntentosConPreguntasSinPuntaje: 1,
+      OficialPreguntasSinPuntaje: 2,
+      OficialAprobados: 6,
+      OficialDesaprobados: 2,
+      OperativoIntentosEntregadosPendientes: 3,
+      OperativoIntentosPendientesConfirmacion: 2,
+      OperativoIntentosSinNotaFinal: 2,
+      OperativoIntentosConPreguntasSinPuntaje: 1,
+      OperativoPreguntasSinPuntaje: 2,
+    }],
+  };
+
+  const aggregateFixture = (overrides: Record<string, unknown> = {}) => ({
+    Publicaciones: 1,
+    PublicacionesConResultadosPendientes: 0,
+    PublicacionesConPendientesOperativos: 0,
+    OficialIntentosValidosEntregados: 10,
+    OficialResultadosConsiderados: 10,
+    OficialResultadosPendientes: 0,
+    OficialIntentosPendientesConfirmacion: 0,
+    OficialIntentosConfirmadosSinNota: 0,
+    OficialIntentosConPreguntasSinPuntaje: 0,
+    OficialPreguntasSinPuntaje: 0,
+    OficialAprobados: 5,
+    OficialDesaprobados: 5,
+    OperativoIntentosEntregadosPendientes: 0,
+    OperativoIntentosPendientesConfirmacion: 0,
+    OperativoIntentosSinNotaFinal: 0,
+    OperativoIntentosConPreguntasSinPuntaje: 0,
+    OperativoPreguntasSinPuntaje: 0,
+    ...overrides,
   });
 
   beforeEach(() => {
@@ -499,6 +691,359 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     expect(reqBuilder.input).not.toHaveBeenCalledWith('IdDocente', expect.anything(), expect.anything());
   });
 
+  it('devuelve el resumen institucional jerárquico sólo cuando lo solicita un administrador', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: institucional,
+      rows: [{
+        IdPublicacion: 47,
+        IdActividad: 18,
+        Titulo: 'Parcial SQL',
+        IdCarrera: 1,
+        Carrera: 'Carrera Norte',
+        IdMateria: 5,
+        Materia: 'Bases de Datos',
+        IdMateriaDivision: 12,
+        Division: '2A',
+      }],
+      total: 3,
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&pagina=1&limite=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios.incluirResumenInstitucional).toBe(true);
+    expect(res.body.data.resumenInstitucional).toMatchObject({
+      unidadEvaluacion: 'idPublicacion',
+      dimensionTemporal: 'publicacion.fechaInicio',
+      global: {
+        publicaciones: 3,
+        publicacionesConResultadosPendientes: 2,
+        publicacionesConPendientesOperativos: 2,
+        resultadosOficiales: {
+          intentosValidosEntregados: 30,
+          resultadosConsiderados: 24,
+          resultadosPendientes: 6,
+          aprobados: 18,
+          desaprobados: 6,
+          porcentajeAprobacion: 75,
+          porcentajeCoberturaConfirmada: 80,
+        },
+        pendientesOperativos: {
+          intentosEntregadosPendientes: 8,
+          intentosPendientesConfirmacion: 5,
+          intentosSinNotaFinal: 4,
+          intentosConPreguntasSinPuntaje: 3,
+          preguntasSinPuntaje: 6,
+        },
+      },
+    });
+    expect(res.body.data.resumenInstitucional.materias).toHaveLength(2);
+    expect(res.body.data.resumenInstitucional.materias[0]).toMatchObject({
+      idCarrera: 1,
+      carrera: 'Carrera Norte',
+      idMateria: 5,
+      materia: 'Bases de Datos',
+      publicaciones: 2,
+      resultadosOficiales: { resultadosConsiderados: 16, porcentajeAprobacion: 75 },
+      comisiones: [{
+        idMateriaDivision: 12,
+        idMateria: 5,
+        idCarrera: 1,
+        resultadosOficiales: { resultadosConsiderados: 16 },
+        pendientesOperativos: { intentosEntregadosPendientes: 5 },
+      }],
+    });
+    expect(res.body.data.resumenInstitucional.materias[1]).toMatchObject({
+      idCarrera: 2,
+      idMateria: 9,
+      materia: 'Bases de Datos',
+      comisiones: [{ idMateriaDivision: 23 }],
+    });
+    expect(res.body.data.resumenInstitucional.carreras).toHaveLength(2);
+    expect(res.body.data.resumenInstitucional.carreras[0]).toMatchObject({
+      idCarrera: 1,
+      carrera: 'Carrera Norte',
+      materias: [{ idMateria: 5, comisiones: [{ idMateriaDivision: 12 }] }],
+    });
+    expect(res.body.data.resumenInstitucional.comparativas).toMatchObject({
+      criteriosElegibilidad: {
+        muestraMinima: 10,
+        coberturaMinimaPorcentaje: 70,
+        naturaleza: 'criterio_operativo_configurable',
+      },
+      carreras: {
+        elegibles: [{ idCarrera: 1, posicion: 1 }],
+        evidenciaLimitada: [{
+          idCarrera: 2,
+          motivosNoElegibilidad: ['MUESTRA_INSUFICIENTE'],
+        }],
+        sinResultados: [],
+      },
+    });
+    expect(Object.keys(res.body.data.resumenInstitucional.global.resultadosOficiales).sort())
+      .toEqual(Object.keys(res.body.data.kpis.resultadosOficiales).sort());
+    expect(Object.keys(res.body.data.resumenInstitucional.global.pendientesOperativos).sort())
+      .toEqual(Object.keys(res.body.data.kpis.pendientesOperativos).sort());
+    expect(res.body.data.evaluaciones[0]).toMatchObject({
+      idCarrera: 1,
+      carrera: 'Carrera Norte',
+    });
+
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('INNER JOIN Carrera C ON C.Id = M.IdCarrera');
+    expect(sqlText).toContain('GROUP BY IdCarrera,Carrera,IdMateria,Materia');
+    expect(sqlText).toContain('GROUP BY IdCarrera,Carrera');
+    expect(sqlText).toContain(
+      'GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division',
+    );
+    expect(sqlText.indexOf('AS PublicacionesConResultadosPendientes'))
+      .toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
+    expect(sqlText).toContain('COALESCE(SUM(OficialResultadosConsiderados),0)');
+  });
+
+  it('clasifica comparativas completas y ordena antes del redondeo visible', async () => {
+    const reqBuilder = mock.pool.request();
+    const materias = [
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 10, Materia: 'Materia A',
+        OficialIntentosValidosEntregados: 20, OficialResultadosConsiderados: 20,
+        OficialAprobados: 8, OficialDesaprobados: 12,
+      }),
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 11, Materia: 'Materia B',
+        OficialIntentosValidosEntregados: 10, OficialResultadosConsiderados: 10,
+        OficialAprobados: 4, OficialDesaprobados: 6,
+      }),
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 12, Materia: 'Materia C',
+        OficialIntentosValidosEntregados: 3, OficialResultadosConsiderados: 2,
+        OficialResultadosPendientes: 1, OficialAprobados: 1, OficialDesaprobados: 1,
+      }),
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 13, Materia: 'Materia D',
+        OficialIntentosValidosEntregados: 5, OficialResultadosConsiderados: 0,
+        OficialResultadosPendientes: 5, OficialAprobados: 0, OficialDesaprobados: 0,
+      }),
+    ];
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        global: aggregateFixture(),
+        carreras: [aggregateFixture({ IdCarrera: 1, Carrera: 'Carrera Norte' })],
+        materias,
+        comisiones: [],
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&muestraMinimaRanking=2&coberturaMinimaRanking=66.67')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    const comparison = res.body.data.resumenInstitucional.comparativas.materias;
+    expect(comparison.elegibles.map((item: any) => [item.idMateria, item.posicion]))
+      .toEqual([[10, 1], [11, 2]]);
+    expect(comparison.evidenciaLimitada).toMatchObject([{
+      idMateria: 12,
+      resultadosOficiales: { porcentajeCoberturaConfirmada: 66.67 },
+      motivosNoElegibilidad: ['COBERTURA_INSUFICIENTE'],
+    }]);
+    expect(comparison.sinResultados).toMatchObject([{
+      idMateria: 13,
+      motivosNoElegibilidad: ['SIN_RESULTADOS_CONFIRMADOS'],
+    }]);
+  });
+
+  it('completa la serie mensual, distingue meses vacíos y marca períodos parciales', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        ...institucional,
+        meses: [aggregateFixture({
+          Periodo: '2026-01',
+          Publicaciones: 1,
+          OficialIntentosValidosEntregados: 12,
+          OficialResultadosConsiderados: 12,
+          OficialAprobados: 0,
+          OficialDesaprobados: 12,
+        })],
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&incluirSerieMensual=true&fechaDesde=2025-12-15T03:00:00.000Z&fechaHasta=2026-02-15T03:00:00.000Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.periodoEfectivo).toEqual({
+      desde: '2025-12-15T03:00:00.000Z',
+      hasta: '2026-02-15T03:00:00.000Z',
+      zonaHoraria: 'America/Argentina/Buenos_Aires',
+      mesesCalendarioIncluidos: 3,
+    });
+    expect(res.body.data.resumenInstitucional.serieMensual).toMatchObject([
+      {
+        periodo: '2025-12', periodoCompleto: false, publicaciones: 0,
+        resultadosOficiales: { porcentajeAprobacion: null, porcentajeCoberturaConfirmada: null },
+      },
+      {
+        periodo: '2026-01', periodoCompleto: true, publicaciones: 1,
+        resultadosOficiales: {
+          resultadosConsiderados: 12,
+          aprobados: 0,
+          porcentajeAprobacion: 0,
+          porcentajeCoberturaConfirmada: 100,
+        },
+      },
+      {
+        periodo: '2026-02', periodoCompleto: false, publicaciones: 0,
+        resultadosOficiales: { porcentajeAprobacion: null },
+      },
+    ]);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain("AT TIME ZONE 'Argentina Standard Time'");
+  });
+
+  it('acepta exactamente 60 meses calendario y genera la colección completa', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: { ...institucional, meses: [] },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&incluirSerieMensual=true&fechaDesde=2020-01-01T03:00:00.000Z&fechaHasta=2024-12-31T23:59:59.999Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.periodoEfectivo.mesesCalendarioIncluidos).toBe(60);
+    expect(res.body.data.resumenInstitucional.serieMensual).toHaveLength(60);
+    expect(res.body.data.resumenInstitucional.serieMensual[0].periodo).toBe('2020-01');
+    expect(res.body.data.resumenInstitucional.serieMensual[59].periodo).toBe('2024-12');
+  });
+
+  it('limita el período efectivo y toda la consulta al instante actual', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: { ...institucional, meses: [] },
+    }));
+
+    const beforeRequest = Date.now();
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&incluirSerieMensual=true&fechaDesde=2026-10-01T03:00:00.000Z&fechaHasta=2099-12-31T23:59:59.999Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const afterRequest = Date.now();
+
+    expect(res.status).toBe(200);
+    const effectiveTo = Date.parse(res.body.data.resumenInstitucional.periodoEfectivo.hasta);
+    expect(effectiveTo).toBeGreaterThanOrEqual(beforeRequest);
+    expect(effectiveTo).toBeLessThanOrEqual(afterRequest);
+    const boundDate = reqBuilder.input.mock.calls
+      .find((call: unknown[]) => call[0] === 'FechaHasta')?.[2] as Date;
+    expect(boundDate.getTime()).toBe(effectiveTo);
+    const series = res.body.data.resumenInstitucional.serieMensual;
+    expect(series[series.length - 1].periodoCompleto).toBe(false);
+  });
+
+  it.each([
+    [
+      'incluirResumenInstitucional=true&incluirSerieMensual=true',
+      'REPORT_SERIES_PERIOD_REQUIRED',
+    ],
+    [
+      'incluirResumenInstitucional=true&incluirSerieMensual=true&fechaDesde=invalida&fechaHasta=2026-01-01',
+      'REPORT_SERIES_PERIOD_INVALID',
+    ],
+    [
+      'incluirResumenInstitucional=true&incluirSerieMensual=true&fechaDesde=2020-01-01T03:00:00.000Z&fechaHasta=2025-01-01T03:00:00.000Z',
+      'REPORT_SERIES_RANGE_TOO_LARGE',
+    ],
+    [
+      'incluirSerieMensual=true&fechaDesde=2026-01-01&fechaHasta=2026-02-01',
+      'REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY',
+    ],
+    [
+      'muestraMinimaRanking=10',
+      'REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY',
+    ],
+  ])('devuelve el error institucional estable para %s', async (query, code) => {
+    const reqBuilder = mock.pool.request();
+    const res = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${query}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe(code);
+    expect(reqBuilder.query).not.toHaveBeenCalled();
+  });
+
+  it('rechaza filtros jerárquicos incompatibles antes de ejecutar el reporte', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+      recordset: [{ Consistente: false }],
+    });
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&idCarrera=1&idMateria=99')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REPORT_FILTERS_INCONSISTENT');
+    expect(reqBuilder.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('aplica un filtro de carrera coherente y lo conserva en los criterios', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce({ recordset: [{ Consistente: true }] })
+      .mockResolvedValueOnce(reportRecordsets({ institutional: institucional }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&idCarrera=1&idMateria=5')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios.idCarrera).toBe(1);
+    expect(reqBuilder.input).toHaveBeenCalledWith('IdCarrera', 'INT', 1);
+    const reportSql = (reqBuilder.query as jest.Mock).mock.calls[1][0];
+    expect(reportSql).toContain('AND C.Id = @IdCarrera');
+  });
+
+  it('rechaza el resumen institucional para docente sin ejecutar SQL', async () => {
+    const reqBuilder = mock.pool.request();
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true')
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('REPORT_SCOPE_FORBIDDEN');
+    expect(reqBuilder.query).not.toHaveBeenCalled();
+  });
+
+  it('rechaza el resumen institucional para alumno mediante el RBAC existente', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('mantiene compatible la consulta docente cuando el resumen institucional es false', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=false')
+      .set('Authorization', `Bearer ${docenteToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional).toBeUndefined();
+    expect(res.body.data.criterios.incluirResumenInstitucional).toBe(false);
+  });
+
   it('resuelve el intento válido antes de evaluar confirmación y conserva el gráfico legacy', async () => {
     const reqBuilder = mock.pool.request();
     (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
@@ -542,6 +1087,7 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
   });
 
   it.each([
+    'idCarrera=7',
     'idMateria=5',
     'idMateriaDivision=12',
     'idActividad=18',
@@ -602,6 +1148,7 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
   });
 
   it.each([
+    'idCarrera=0',
     'idMateria=0',
     'idMateriaDivision=abc',
     'idActividad=1.5',
@@ -616,6 +1163,12 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     'fechaDesde=no-es-fecha',
     'fechaDesde=2026-02-31',
     'conIncidentes=si',
+    'incluirResumenInstitucional=si',
+    'incluirSerieMensual=si',
+    'muestraMinimaRanking=0',
+    'muestraMinimaRanking=1.5',
+    'coberturaMinimaRanking=-1',
+    'coberturaMinimaRanking=101',
     'severidad=critica',
     'conIncidentes=false&tipoIncidente=focus_lost',
     'filtroDesconocido=1',
@@ -710,6 +1263,66 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     expect(first.body.data.graficos).toEqual(second.body.data.graficos);
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText.indexOf('FROM #ReporteEvaluaciones;')).toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
+  });
+
+  it('calcula el resumen institucional antes de paginar las publicaciones', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce(reportRecordsets({
+        institutional: institucional,
+        rows: [{ IdPublicacion: 47 }],
+        total: 3,
+      }))
+      .mockResolvedValueOnce(reportRecordsets({
+        institutional: institucional,
+        rows: [{ IdPublicacion: 48 }],
+        total: 3,
+      }));
+
+    const first = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&pagina=1&limite=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const second = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&pagina=2&limite=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(first.body.data.evaluaciones).not.toEqual(second.body.data.evaluaciones);
+    expect(first.body.data.resumenInstitucional).toEqual(second.body.data.resumenInstitucional);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText.indexOf('AS PublicacionesConPendientesOperativos'))
+      .toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
+  });
+
+  it('devuelve porcentajes institucionales null cuando no existe denominador', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        global: {
+          Publicaciones: 0,
+          PublicacionesConResultadosPendientes: 0,
+          PublicacionesConPendientesOperativos: 0,
+        },
+        carreras: [],
+        materias: [],
+        comisiones: [],
+      },
+      rows: [],
+      total: 0,
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.global.resultadosOficiales).toMatchObject({
+      intentosValidosEntregados: 0,
+      resultadosConsiderados: 0,
+      resultadosPendientes: 0,
+      porcentajeAprobacion: null,
+      porcentajeCoberturaConfirmada: null,
+    });
+    expect(res.body.data.resumenInstitucional.materias).toEqual([]);
   });
 
   it('clasifica estados y corrección pendiente sin consolidar intentos múltiples', async () => {

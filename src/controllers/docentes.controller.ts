@@ -136,18 +136,29 @@ export const getMateriasByDocente = async (req: Request, res: Response) => {
 export const getEvaluacionesByDocente = async (req: Request, res: Response) => {
   try {
     const { legajo } = req.params;
+    const actor = (req as Request & { user: { role: string; idDocente?: number | null } }).user;
+    if (actor.role === 'docente' && Number(legajo) !== Number(actor.idDocente)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No puede consultar evaluaciones de otro docente',
+        code: 'TEACHER_SCOPE_FORBIDDEN',
+      });
+    }
     const result = await pool.request()
       .input('Legajo', sql.Int, legajo)
       .query(`
-        SELECT P.Id AS IdPublicacion, A.Titulo, A.Tipo, A.DuracionMinutos,
+        SELECT P.Id AS IdPublicacion, A.Id AS IdActividad,
+               M.Id AS IdMateria, MD.Id AS IdMateriaDivision,
+               A.Titulo, A.Tipo, A.DuracionMinutos,
                A.CantidadIntentosMaximos, A.Estado, P.FechaInicio, P.FechaFin,
-               M.Nombre AS Materia, Dv.Descripcion AS Division,
+               M.Nombre AS Materia, Dv.Descripcion AS Division, C.Nombre AS Carrera,
                (SELECT COUNT(*) FROM InscripcionMateria WHERE IdMateriaDivision = MD.Id) AS AlumnosInscriptos,
                (SELECT COUNT(*) FROM Intento WHERE IdPublicacion = P.Id) AS TotalIntentos
         FROM Publicacion P
         INNER JOIN Actividad A ON P.IdActividad = A.Id
         INNER JOIN MateriaDivision MD ON P.IdMateriaDivision = MD.Id
         INNER JOIN Materia M ON MD.IdMateria = M.Id
+        INNER JOIN Carrera C ON M.IdCarrera = C.Id
         INNER JOIN Division Dv ON MD.IdDivision = Dv.Id
         WHERE MD.IdDocente = @Legajo
         ORDER BY P.FechaFin DESC

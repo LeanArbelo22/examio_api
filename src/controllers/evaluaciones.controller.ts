@@ -2,306 +2,101 @@ import { Request, Response } from 'express';
 import { pool } from '../config/db';
 import * as sql from 'mssql';
 import { mapKeysToCamelCase } from '../utils/camelCaseMapper';
+import { z } from 'zod';
+import { IdBancoSchema, IdempotencyKeySchema } from '../schemas/banco.schema';
+import { autorizarActividad } from '../services/evaluacion-access.service';
+import { ActorBanco, BancoError, atomico, consultar } from '../services/banco-common.service';
+import { responderErrorBanco } from './banco.controller';
+import { completarIdempotencia, iniciarIdempotencia } from '../services/idempotency.service';
+import { crearEvaluacion, modificarBorrador, publicarBorrador } from '../services/evaluacion-write.service';
+import { eliminarSeleccionIntentoValido, listarIntentosPublicacion, seleccionarIntentoValido } from '../services/intento-valido.service';
+import { autorizarAccesoIntento } from '../services/intento-respuesta.service';
+
+function obtenerIdempotencyKey(req: Request) {
+  const parsed = IdempotencyKeySchema.safeParse(req.header('Idempotency-Key'));
+  if (!parsed.success) throw new BancoError(400, 'Idempotency-Key debe ser un UUID válido', 'REQUEST_INVALID');
+  return parsed.data;
+}
 
 export const guardarEvaluacionCompleta = async (req: Request, res: Response) => {
-  const transaction = new sql.Transaction(pool);
   try {
-    await transaction.begin();
-
-    const {
-      Titulo, Descripcion, Tipo, CantidadIntentosMaximos, DuracionMinutos, RecursosPermitidos,
-      IdMateriaDivision, FechaInicio, FechaFin, Estado, GruposPreguntas
-    } = req.body;
-
-    const estadoFinal = Estado || 'publicada';
-
-    console.log('🟡 [crear-examen] payload recibido:', JSON.stringify({
-      Titulo, Tipo, CantidadIntentosMaximos, DuracionMinutos,
-      IdMateriaDivision, FechaInicio, FechaFin, Estado: estadoFinal,
-      GruposCount: GruposPreguntas?.length,
-      Grupos: GruposPreguntas?.map((g: any) => ({
-        TituloReferencia: g.TituloReferencia,
-        Variantes: g.Variantes?.map((v: any) => ({
-          Enunciado: v.Enunciado?.substring(0, 60),
-          Tipo: v.Tipo,
-          OpcionesCount: v.Opciones?.length ?? 0,
-        })),
-      })),
-    }, null, 2));
-
-    const actResult = await transaction.request()
-      .input('Titulo', sql.NVarChar, Titulo)
-      .input('Descripcion', sql.NVarChar, Descripcion || null)
-      .input('Tipo', sql.NVarChar, Tipo)
-      .input('CantidadIntentosMaximos', sql.Int, CantidadIntentosMaximos)
-      .input('DuracionMinutos', sql.Int, DuracionMinutos || null)
-      .input('RecursosPermitidos', sql.NVarChar, RecursosPermitidos || null)
-      .execute('SP_Actividad_Crear');
-
-    const idActividad = actResult.recordset[0].IdActividad;
-
-    // Si el Frontend pidió 'borrador', corregimos el estado que el SP dejó como 'publicada'
-    if (estadoFinal !== 'publicada') {
-      await transaction.request()
-        .input('Id', sql.Int, idActividad)
-        .input('Estado', sql.NVarChar, estadoFinal)
-        .query('UPDATE Actividad SET Estado = @Estado WHERE Id = @Id');
-    }
-
-    await transaction.request()
-      .input('IdActividad', sql.Int, idActividad)
-      .input('IdMateriaDivision', sql.Int, IdMateriaDivision)
-      .input('FechaInicio', sql.DateTime, new Date(FechaInicio))
-      .input('FechaFin', sql.DateTime, new Date(FechaFin))
-      .query(`INSERT INTO Publicacion (IdActividad, IdMateriaDivision, FechaInicio, FechaFin, Visible)
-              VALUES (@IdActividad, @IdMateriaDivision, @FechaInicio, @FechaFin, 1)`);
-
-    for (const grupo of GruposPreguntas) {
-      const gResult = await transaction.request()
-        .input('IdActividad', sql.Int, idActividad)
-        .input('Titulo', sql.NVarChar, grupo.TituloReferencia)
-        .query('INSERT INTO GrupoPregunta (IdActividad, TituloReferencia) VALUES (@IdActividad, @Titulo); SELECT SCOPE_IDENTITY() AS Id;');
-
-      const idGrupo = gResult.recordset[0].Id;
-
-      for (const variante of grupo.Variantes) {
-        const pResult = await transaction.request()
-          .input('IdGrupo', sql.Int, idGrupo)
-          .input('Enunciado', sql.NVarChar, variante.Enunciado)
-          .input('Tipo', sql.NVarChar, variante.Tipo)
-          .query('INSERT INTO Pregunta (IdGrupoPregunta, Enunciado, Tipo) VALUES (@IdGrupo, @Enunciado, @Tipo); SELECT SCOPE_IDENTITY() AS Id;');
-
-        const idPregunta = pResult.recordset[0].Id;
-
-        if (variante.Opciones && (variante.Tipo === 'mc' || variante.Tipo === 'vf')) {
-          for (const op of variante.Opciones) {
-            await transaction.request()
-              .input('IdPregunta', sql.Int, idPregunta)
-              .input('Texto', sql.NVarChar, op.Texto)
-              .input('EsCorrecta', sql.Bit, op.EsCorrecta)
-              .query('INSERT INTO Opcion (IdPregunta, Texto, EsCorrecta) VALUES (@IdPregunta, @Texto, @EsCorrecta)');
-          }
-        }
+    const actor = (req as Request & { user: ActorBanco }).user;
+    const key = obtenerIdempotencyKey(req);
+    const data = await atomico(async tx => {
+      const idem = await iniciarIdempotencia(tx, actor, 'evaluacion.guardar-completo', key, req.body);
+      if (idem.replay) {
+        const reference = idem.result as { IdActividad: number };
+        await autorizarActividad(tx, actor, reference.IdActividad, false);
+        return idem.result;
       }
-    }
-
-    await transaction.commit();
-    res.status(201).json({ success: true, data: { idActividad } });
-  } catch (err: unknown) {
-    if (transaction) await transaction.rollback();
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+      const result = await crearEvaluacion(tx, actor, req.body);
+      await completarIdempotencia(tx, idem.id, result, 201);
+      return result;
+    });
+    res.status(201).json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
 };
 
 export const modificarEvaluacionCompleta = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = IdBancoSchema.parse(req.params.id);
+    const data = await atomico(tx => modificarBorrador(tx, (req as Request & { user: ActorBanco }).user, id, req.body));
+    res.json({ success: true, message: 'Evaluación modificada correctamente', data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
+};
 
-    const checkResult = await pool.request()
-      .input('Id', sql.Int, id)
-      .query('SELECT Id, Estado FROM Actividad WHERE Id = @Id');
-
-    if (checkResult.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Actividad no encontrada' });
-    }
-
-    if (checkResult.recordset[0].Estado !== 'borrador') {
-      return res.status(400).json({
-        success: false,
-        message: 'No se puede modificar una evaluación que ya ha sido publicada o archivada.',
-      });
-    }
-
-    const idActividad = parseInt(id, 10);
-    const {
-      Titulo, Descripcion, Tipo, CantidadIntentosMaximos, DuracionMinutos, RecursosPermitidos,
-      IdMateriaDivision, FechaInicio, FechaFin, IdPublicacion, GruposPreguntas
-    } = req.body;
-
-    const transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
-    try {
-      // 1. UPDATE Actividad
-      await transaction.request()
-        .input('Id', sql.Int, idActividad)
-        .input('Titulo', sql.NVarChar, Titulo)
-        .input('Descripcion', sql.NVarChar, Descripcion || null)
-        .input('Tipo', sql.NVarChar, Tipo)
-        .input('CantidadIntentosMaximos', sql.Int, CantidadIntentosMaximos)
-        .input('DuracionMinutos', sql.Int, DuracionMinutos || null)
-        .input('RecursosPermitidos', sql.NVarChar, RecursosPermitidos || null)
-        .query(`UPDATE Actividad SET
-          Titulo = @Titulo, Descripcion = @Descripcion, Tipo = @Tipo,
-          CantidadIntentosMaximos = @CantidadIntentosMaximos,
-          DuracionMinutos = @DuracionMinutos,
-          RecursosPermitidos = @RecursosPermitidos
-          WHERE Id = @Id`);
-
-      // 2. UPDATE Publicacion
-      await transaction.request()
-        .input('Id', sql.Int, IdPublicacion)
-        .input('IdMateriaDivision', sql.Int, IdMateriaDivision)
-        .input('FechaInicio', sql.DateTime, new Date(FechaInicio))
-        .input('FechaFin', sql.DateTime, new Date(FechaFin))
-        .query(`UPDATE Publicacion SET
-          IdMateriaDivision = @IdMateriaDivision,
-          FechaInicio = @FechaInicio, FechaFin = @FechaFin
-          WHERE Id = @Id`);
-
-      // 3. Load existing structure from BD
-      const existingGrupos = (await transaction.request()
-        .input('IdActividad', sql.Int, idActividad)
-        .query('SELECT Id FROM GrupoPregunta WHERE IdActividad = @IdActividad')
-      ).recordset.map((r: any) => r.Id);
-
-      const existingPreguntasByGrupo: Record<number, number[]> = {};
-      for (const gId of existingGrupos) {
-        existingPreguntasByGrupo[gId] = (await transaction.request()
-          .input('IdGrupo', sql.Int, gId)
-          .query('SELECT Id FROM Pregunta WHERE IdGrupoPregunta = @IdGrupo')
-        ).recordset.map((r: any) => r.Id);
-      }
-
-      const existingOpcionesByPregunta: Record<number, number[]> = {};
-      for (const gId of existingGrupos) {
-        for (const pId of (existingPreguntasByGrupo[gId] || [])) {
-          existingOpcionesByPregunta[pId] = (await transaction.request()
-            .input('IdPregunta', sql.Int, pId)
-            .query('SELECT Id FROM Opcion WHERE IdPregunta = @IdPregunta')
-          ).recordset.map((r: any) => r.Id);
-        }
-      }
-
-      // 4. DELETE removed grupos (bottom-up: opciones → preguntas → grupo)
-      const payloadGrupoIds: number[] = GruposPreguntas
-        .filter((g: any) => g.Id != null)
-        .map((g: any) => g.Id);
-
-      for (const gId of existingGrupos) {
-        if (!payloadGrupoIds.includes(gId)) {
-          for (const pId of (existingPreguntasByGrupo[gId] || [])) {
-            await transaction.request()
-              .input('IdPregunta', sql.Int, pId)
-              .query('DELETE FROM Opcion WHERE IdPregunta = @IdPregunta');
-          }
-          await transaction.request()
-            .input('IdGrupo', sql.Int, gId)
-            .query('DELETE FROM Pregunta WHERE IdGrupoPregunta = @IdGrupo');
-          await transaction.request()
-            .input('Id', sql.Int, gId)
-            .query('DELETE FROM GrupoPregunta WHERE Id = @Id');
-        }
-      }
-
-      // 5. Process each Grupo (UPSERT + preguntas)
-      for (const grupo of GruposPreguntas) {
-        let idGrupo: number;
-
-        if (grupo.Id != null) {
-          await transaction.request()
-            .input('Id', sql.Int, grupo.Id)
-            .input('Titulo', sql.NVarChar, grupo.TituloReferencia)
-            .query('UPDATE GrupoPregunta SET TituloReferencia = @Titulo WHERE Id = @Id');
-          idGrupo = grupo.Id;
-        } else {
-          const gResult = await transaction.request()
-            .input('IdActividad', sql.Int, idActividad)
-            .input('Titulo', sql.NVarChar, grupo.TituloReferencia)
-            .query('INSERT INTO GrupoPregunta (IdActividad, TituloReferencia) VALUES (@IdActividad, @Titulo); SELECT SCOPE_IDENTITY() AS Id;');
-          idGrupo = gResult.recordset[0].Id;
-        }
-
-        // Determine which preguntas to delete within this grupo
-        const payloadPreguntaIds: number[] = grupo.Variantes
-          .filter((v: any) => v.Id != null)
-          .map((v: any) => v.Id);
-
-        for (const pId of (existingPreguntasByGrupo[grupo.Id] || [])) {
-          if (!payloadPreguntaIds.includes(pId)) {
-            await transaction.request()
-              .input('IdPregunta', sql.Int, pId)
-              .query('DELETE FROM Opcion WHERE IdPregunta = @IdPregunta');
-            await transaction.request()
-              .input('Id', sql.Int, pId)
-              .query('DELETE FROM Pregunta WHERE Id = @Id');
-          }
-        }
-
-        // Process each Variante (pregunta)
-        for (const variante of grupo.Variantes) {
-          let idPregunta: number;
-
-          if (variante.Id != null) {
-            await transaction.request()
-              .input('Id', sql.Int, variante.Id)
-              .input('Enunciado', sql.NVarChar, variante.Enunciado)
-              .input('Tipo', sql.NVarChar, variante.Tipo)
-              .query('UPDATE Pregunta SET Enunciado = @Enunciado, Tipo = @Tipo WHERE Id = @Id');
-            idPregunta = variante.Id;
-          } else {
-            const pResult = await transaction.request()
-              .input('IdGrupo', sql.Int, idGrupo)
-              .input('Enunciado', sql.NVarChar, variante.Enunciado)
-              .input('Tipo', sql.NVarChar, variante.Tipo)
-              .query('INSERT INTO Pregunta (IdGrupoPregunta, Enunciado, Tipo) VALUES (@IdGrupo, @Enunciado, @Tipo); SELECT SCOPE_IDENTITY() AS Id;');
-            idPregunta = pResult.recordset[0].Id;
-          }
-
-          // Handle Opciones
-          if (variante.Opciones) {
-            const payloadOpcionIds: number[] = variante.Opciones
-              .filter((o: any) => o.Id != null)
-              .map((o: any) => o.Id);
-
-            if (variante.Id != null) {
-              for (const oId of (existingOpcionesByPregunta[variante.Id] || [])) {
-                if (!payloadOpcionIds.includes(oId)) {
-                  await transaction.request()
-                    .input('Id', sql.Int, oId)
-                    .query('DELETE FROM Opcion WHERE Id = @Id');
-                }
-              }
-            }
-
-            for (const opcion of variante.Opciones) {
-              if (opcion.Id != null) {
-                await transaction.request()
-                  .input('Id', sql.Int, opcion.Id)
-                  .input('Texto', sql.NVarChar, opcion.Texto)
-                  .input('EsCorrecta', sql.Bit, opcion.EsCorrecta)
-                  .query('UPDATE Opcion SET Texto = @Texto, EsCorrecta = @EsCorrecta WHERE Id = @Id');
-              } else {
-                await transaction.request()
-                  .input('IdPregunta', sql.Int, idPregunta)
-                  .input('Texto', sql.NVarChar, opcion.Texto)
-                  .input('EsCorrecta', sql.Bit, opcion.EsCorrecta)
-                  .query('INSERT INTO Opcion (IdPregunta, Texto, EsCorrecta) VALUES (@IdPregunta, @Texto, @EsCorrecta)');
-              }
-            }
-          }
-        }
-      }
-
-      await transaction.commit();
-      res.json({ success: true, message: 'Evaluación modificada correctamente' });
-    } catch (txErr) {
-      await transaction.rollback();
-      throw txErr;
-    }
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+export const publicarEvaluacionCompleta = async (req: Request, res: Response) => {
+  try {
+    const id = IdBancoSchema.parse(req.params.idActividad);
+    const actor = (req as Request & { user: ActorBanco }).user;
+    const key = obtenerIdempotencyKey(req);
+    const data = await atomico(async tx => {
+      const idem = await iniciarIdempotencia(tx, actor, `evaluacion.${id}.publicar-completo`, key, req.body);
+      if (idem.replay) { await autorizarActividad(tx, actor, id, false); return idem.result; }
+      const result = await publicarBorrador(tx, actor, id, req.body);
+      await completarIdempotencia(tx, idem.id, result, 200);
+      return result;
+    });
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
 };
 
 export const obtenerExamenSorteado = async (req: Request, res: Response) => {
   try {
+    const idIntento = IdBancoSchema.parse(req.params.idIntento);
+    await autorizarAccesoIntento((req as Request & { user: ActorBanco }).user, idIntento);
     const result = await pool.request()
-      .input('IdIntento', sql.Int, req.params.idIntento)
+      .input('IdIntento', sql.Int, idIntento)
       .execute('SP_Intento_ObtenerExamenDinamico');
-    res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
+    const data = result.recordset.map((row: any) => {
+      const mapped = mapKeysToCamelCase(row) as Record<string, unknown>;
+      const mostrarPuntaje = Boolean(row.MostrarPuntajePorPregunta);
+      delete mapped.mostrarPuntajePorPregunta;
+      if (!mostrarPuntaje) delete mapped.puntajeMaximo;
+      if (row.IdRespuesta != null) {
+        let idsOpcionesSeleccionadas: number[] = [];
+        if (typeof row.OpcionesSeleccionadasJson === 'string') {
+          try {
+            idsOpcionesSeleccionadas = (JSON.parse(row.OpcionesSeleccionadasJson) as Array<{ idOpcion: number }>)
+              .map(item => Number(item.idOpcion));
+          } catch { idsOpcionesSeleccionadas = []; }
+        }
+        mapped.respuesta = {
+          idRespuesta: row.IdRespuesta,
+          idsOpcionesSeleccionadas,
+          rtaTexto: row.RtaTexto ?? null,
+          justificacion: row.Justificacion ?? null,
+          revision: Number(row.Revision ?? 0),
+        };
+      } else mapped.respuesta = null;
+      delete mapped.idRespuesta;
+      delete mapped.opcionesSeleccionadasJson;
+      delete mapped.rtaTexto;
+      delete mapped.justificacion;
+      delete mapped.revision;
+      return mapped;
+    });
+    res.json({ success: true, data });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error desconocido';
     res.status(500).json({ success: false, message });
@@ -310,30 +105,37 @@ export const obtenerExamenSorteado = async (req: Request, res: Response) => {
 
 export const obtenerOpcionesPregunta = async (req: Request, res: Response) => {
   try {
+    const actor = (req as Request & { user: ActorBanco }).user;
+    const idIntento = IdBancoSchema.parse(req.params.idIntento);
+    const idPregunta = IdBancoSchema.parse(req.params.idPregunta);
+    await autorizarAccesoIntento(actor, idIntento);
     const result = await pool.request()
-      .input('IdPregunta', sql.Int, req.params.idPregunta)
-      .input('IdIntento', sql.Int, req.params.idIntento)
+      .input('IdPregunta', sql.Int, idPregunta)
+      .input('IdIntento', sql.Int, idIntento)
       .execute('SP_Pregunta_ObtenerOpciones');
-    res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
-  }
+    const data = mapKeysToCamelCase(result.recordset) as Array<Record<string, unknown>>;
+    if (actor.role === 'alumno') data.forEach(option => delete option.esCorrecta);
+    res.json({ success: true, data });
+  } catch (err: unknown) { responderErrorBanco(res, err); }
 };
 
 export const actualizarEstadoEvaluacion = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const { estado } = req.body;
-    await pool.request()
-      .input('Id', sql.Int, id)
-      .input('Estado', sql.NVarChar, estado)
-      .query('UPDATE Actividad SET Estado = @Estado WHERE Id = @Id');
+    const id = IdBancoSchema.parse(req.params.id);
+    const { estado } = z.object({ estado: z.enum(['borrador','publicada','archivada']) }).strict().parse(req.body);
+    await atomico(async tx => {
+      const actual = await autorizarActividad(tx, (req as any).user, id, false);
+      if (actual.Estado === estado) return;
+      if (estado === 'borrador' || actual.Estado === 'archivada')
+        throw new BancoError(400, 'Transición de estado no permitida', 'EVALUATION_ALREADY_PUBLISHED');
+      if (actual.Estado === 'borrador' && estado === 'publicada')
+        throw new BancoError(400, 'Use publicar-completo para validar y publicar el borrador', 'DRAFT_NOT_PUBLISHABLE');
+      await consultar(tx, 'UPDATE dbo.Actividad SET Estado=@Estado,Revision=Revision+1 WHERE Id=@Id', { Id: id, Estado: estado });
+    });
 
     res.json({ success: true, message: 'Estado actualizado' });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error desconocido';
-    res.status(500).json({ success: false, message });
+    responderErrorBanco(res, err);
   }
 };
 
@@ -345,7 +147,8 @@ export const obtenerPendientesPorAlumno = async (req: Request, res: Response) =>
       .query(`
         SELECT P.Id AS IdPublicacion, A.Titulo, A.Descripcion, A.DuracionMinutos,
                P.FechaInicio, P.FechaFin, A.RecursosPermitidos,
-               A.CantidadIntentosMaximos,
+               A.CantidadIntentosMaximos,A.EscalaCalificacion,A.NotaAprobacion,
+               A.ModoPuntaje,A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                M.Nombre AS Materia, C.Nombre AS Carrera,
                D.Nombre + ' ' + D.Apellido AS Docente,
                ULT.Estado AS EstadoUltimoIntento,
@@ -400,6 +203,8 @@ export const obtenerPublicacionPorId = async (req: Request, res: Response) => {
       .query(`
         SELECT P.Id AS IdPublicacion, A.Titulo, A.Descripcion, A.DuracionMinutos,
                P.FechaInicio, P.FechaFin, A.RecursosPermitidos,
+               A.EscalaCalificacion,A.NotaAprobacion,A.ModoPuntaje,
+               A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                M.Nombre AS Materia, C.Nombre AS Carrera,
                D.Nombre + ' ' + D.Apellido AS Docente,
                (SELECT COUNT(*) FROM GrupoPregunta WHERE IdActividad = A.Id) AS GruposCount
@@ -428,7 +233,9 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
       .input('Id', sql.Int, id)
       .query(`
         SELECT A.Id AS IdActividad, A.Titulo, A.Descripcion, A.Tipo, A.DuracionMinutos,
-               A.CantidadIntentosMaximos, A.Estado, A.RecursosPermitidos,
+               A.CantidadIntentosMaximos, A.Estado, A.RecursosPermitidos, A.Revision,
+               A.EscalaCalificacion,A.NotaAprobacion,A.ModoPuntaje,
+               A.MostrarPuntajePorPregunta,A.CorreccionAutomaticaCerradas,
                P.Id AS IdPublicacion, P.FechaInicio, P.FechaFin,
                M.Nombre AS Materia, Dv.Descripcion AS Division
         FROM Actividad A
@@ -448,10 +255,27 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
     const detalleResult = await pool.request()
       .input('IdActividad', sql.Int, header.IdActividad)
       .query(`
+        ;WITH GruposDetalle AS (
+          SELECT GP.*,
+            ROW_NUMBER() OVER (ORDER BY GP.Id) AS Posicion,
+            COUNT(*) OVER () AS TotalGrupos
+          FROM GrupoPregunta GP
+          WHERE GP.IdActividad=@IdActividad
+        )
         SELECT GP.Id AS IdGrupo, GP.TituloReferencia,
-               PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,
+               CAST(CASE WHEN A.ModoPuntaje='iguales' THEN
+                 (((A.EscalaCalificacion * 100) / GP.TotalGrupos) +
+                   CASE WHEN GP.Posicion <= ((A.EscalaCalificacion * 100) % GP.TotalGrupos) THEN 1 ELSE 0 END) / 100.0
+                 ELSE GP.PuntajeMaximo END AS decimal(5,2)) AS PuntajeMaximo,
+               GP.IdBancoGrupoOrigen, GP.RevisionBancoOrigen AS RevisionGrupoBancoOrigen,
+               GP.FechaIncorporacionBanco AS FechaGrupoIncorporacionBanco,
+               PR.Id AS IdPregunta, PR.Enunciado, PR.Tipo,PR.ModoJustificacion,
+               PR.EstrategiaCorreccion,PR.TratamientoJustificacion,PR.ContenidoHash,
+               PR.IdBancoPreguntaOrigen, PR.RevisionBancoOrigen AS RevisionPreguntaBancoOrigen,
+               PR.FechaIncorporacionBanco AS FechaPreguntaIncorporacionBanco,
                O.Id AS IdOpcion, O.Texto, O.EsCorrecta
-        FROM GrupoPregunta GP
+        FROM GruposDetalle GP
+        INNER JOIN Actividad A ON A.Id=GP.IdActividad
         INNER JOIN Pregunta PR ON PR.IdGrupoPregunta = GP.Id
         LEFT JOIN Opcion O ON O.IdPregunta = PR.Id
         WHERE GP.IdActividad = @IdActividad
@@ -466,6 +290,10 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
         gruposMap[row.IdGrupo] = {
           idGrupo: row.IdGrupo,
           tituloReferencia: row.TituloReferencia,
+          puntajeMaximo: row.PuntajeMaximo,
+          idBancoGrupoOrigen: row.IdBancoGrupoOrigen,
+          revisionBancoOrigen: row.RevisionGrupoBancoOrigen,
+          fechaIncorporacionBanco: row.FechaGrupoIncorporacionBanco,
           preguntas: [],
         };
       }
@@ -475,6 +303,13 @@ export const getDetallePublicacion = async (req: Request, res: Response) => {
           idPregunta: row.IdPregunta,
           enunciado: row.Enunciado,
           tipo: row.Tipo,
+          modoJustificacion: row.ModoJustificacion,
+          estrategiaCorreccion: row.EstrategiaCorreccion,
+          tratamientoJustificacion: row.TratamientoJustificacion,
+          contenidoHash: row.ContenidoHash,
+          idBancoPreguntaOrigen: row.IdBancoPreguntaOrigen,
+          revisionBancoOrigen: row.RevisionPreguntaBancoOrigen,
+          fechaIncorporacionBanco: row.FechaPreguntaIncorporacionBanco,
           opciones: [],
         };
         gruposMap[row.IdGrupo].preguntas.push(preguntasMap[row.IdPregunta]);
@@ -533,4 +368,47 @@ export const getAlumnosByPublicacion = async (req: Request, res: Response) => {
     const message = err instanceof Error ? err.message : 'Error desconocido';
     res.status(500).json({ success: false, message });
   }
+};
+
+export const listarIntentosAlumnoPublicacion = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await listarIntentosPublicacion(
+      pool,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+    );
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
+};
+
+export const seleccionarIntentoValidoAlumno = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await atomico(tx => seleccionarIntentoValido(
+      tx,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+      req.body.IdIntento,
+    ));
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
+};
+
+export const eliminarIntentoValidoAlumno = async (req: Request, res: Response) => {
+  try {
+    const idPublicacion = IdBancoSchema.parse(req.params.idPublicacion);
+    const matricula = IdBancoSchema.parse(req.params.matricula);
+    const data = await atomico(tx => eliminarSeleccionIntentoValido(
+      tx,
+      (req as any).user,
+      idPublicacion,
+      matricula,
+    ));
+    res.json({ success: true, data: mapKeysToCamelCase(data) });
+  } catch (error) { responderErrorBanco(res, error); }
 };

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { createMockPool } from './mocks/db';
+import { createRefreshToken } from '../src/services/auth-token.service';
 
 const mock = createMockPool();
 
@@ -13,12 +14,13 @@ let docenteToken: string;
 let alumnoToken: string;
 let invalidToken: string;
 beforeAll(() => {
-  process.env.JWT_SECRET = 'test-secret-key';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
+  process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   adminToken = jwt.sign({ id: 1, email: 'admin@test.com', role: 'admin' }, process.env.JWT_SECRET);
-  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
-  alumnoToken = jwt.sign({ id: 3, email: 'alumno@test.com', role: 'alumno' }, process.env.JWT_SECRET);
+  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente', idDocente: 10 }, process.env.JWT_SECRET);
+  alumnoToken = jwt.sign({ id: 3, email: 'alumno@test.com', role: 'alumno', idAlumno: 30500 }, process.env.JWT_SECRET);
   invalidToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.malformed';
-  app = require('../src/index').app;
+  app = require('../src/app').app;
 });
 
 afterEach(() => {
@@ -127,18 +129,21 @@ describe('RBAC - Protección de rutas por rol', () => {
     it('POST /api/evaluaciones/guardar-completo - docente autorizado', async () => {
       const tx = new mock.pool.Transaction();
       const txRequest = tx.request();
-      (txRequest.execute as jest.Mock).mockResolvedValueOnce({ recordset: [{ IdActividad: 1 }] });
       (txRequest.query as jest.Mock)
-        .mockResolvedValueOnce({})
-        .mockResolvedValueOnce({ recordset: [{ Id: 1 }] })
+        .mockResolvedValueOnce({ recordset: [] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 900 }] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 1, IdDocente: 10, DocenteActivo: true }] })
+        .mockResolvedValueOnce({ recordset: [{ Id: 1, Revision: 1 }] })
         .mockResolvedValueOnce({ recordset: [{ Id: 1 }] })
         .mockResolvedValueOnce({});
 
       const res = await request(app)
         .post('/api/evaluaciones/guardar-completo')
         .set('Authorization', `Bearer ${docenteToken}`)
+        .set('Idempotency-Key', '00000000-0000-4000-8000-000000000030')
         .send({
           Titulo: 'Test',
+          Estado: 'borrador',
           Tipo: 'evaluacion',
           CantidadIntentosMaximos: 2,
           DuracionMinutos: 60,
@@ -247,7 +252,7 @@ describe('RBAC - Protección de rutas por rol', () => {
       const res = await request(app).get('/api/docentes');
 
       expect(res.status).toBe(401);
-      expect(res.body.message).toBe('Acceso no autorizado');
+      expect(res.body.code).toBe('ACCESS_TOKEN_MISSING');
     });
 
     it('retorna 401 cuando el token es inválido', async () => {
@@ -256,7 +261,7 @@ describe('RBAC - Protección de rutas por rol', () => {
         .set('Authorization', `Bearer ${invalidToken}`);
 
       expect(res.status).toBe(401);
-      expect(res.body.message).toBe('Token inválido');
+      expect(res.body.code).toBe('ACCESS_TOKEN_INVALID');
     });
 
     it('retorna 401 cuando no se envía token en POST /api/docentes', async () => {
@@ -265,6 +270,64 @@ describe('RBAC - Protección de rutas por rol', () => {
         .send({ Legajo: 101, Nombre: 'Test', Apellido: 'User', Correo: 'test@test.com' });
 
       expect(res.status).toBe(401);
+    });
+
+    it('diferencia access token vencido', async () => {
+      const expiredToken = jwt.sign(
+        { id: 1, email: 'admin@test.com', role: 'admin' },
+        process.env.JWT_SECRET!,
+        { expiresIn: -60 },
+      );
+      const res = await request(app)
+        .get('/api/docentes')
+        .set('Authorization', `Bearer ${expiredToken}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('ACCESS_TOKEN_EXPIRED');
+    });
+
+    it('rechaza algoritmo, issuer y audience incorrectos', async () => {
+      const claims = {
+        id: 1,
+        email: 'admin@test.com',
+        role: 'admin',
+        tokenType: 'access',
+        sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      };
+      const invalidTokens = [
+        jwt.sign(claims, process.env.JWT_SECRET!, { algorithm: 'HS384', issuer: 'examio-api', audience: 'examio-bff', expiresIn: '15m' }),
+        jwt.sign(claims, process.env.JWT_SECRET!, { algorithm: 'HS256', issuer: 'otro-emisor', audience: 'examio-bff', expiresIn: '15m' }),
+        jwt.sign(claims, process.env.JWT_SECRET!, { algorithm: 'HS256', issuer: 'examio-api', audience: 'otra-audiencia', expiresIn: '15m' }),
+      ];
+
+      for (const invalid of invalidTokens) {
+        const res = await request(app)
+          .get('/api/docentes')
+          .set('Authorization', `Bearer ${invalid}`);
+        expect(res.status).toBe(401);
+        expect(res.body.code).toBe('ACCESS_TOKEN_INVALID');
+      }
+    });
+
+    it('rechaza un refresh token opaco usado como access token', async () => {
+      const refreshToken = createRefreshToken('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+      const res = await request(app)
+        .get('/api/docentes')
+        .set('Authorization', `Bearer ${refreshToken}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('ACCESS_TOKEN_INVALID');
+    });
+
+    it('un 403 conserva código FORBIDDEN y no parece una expiración', async () => {
+      const res = await request(app)
+        .post('/api/docentes')
+        .set('Authorization', `Bearer ${alumnoToken}`)
+        .send({ Legajo: 101, Nombre: 'Test', Apellido: 'User', Correo: 'test@test.com' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('FORBIDDEN');
+      expect(res.body.code).not.toContain('TOKEN');
     });
   });
 });

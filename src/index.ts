@@ -1,47 +1,38 @@
 import dotenv from 'dotenv';
 dotenv.config();
-import express from 'express';
-import cors from 'cors';
+import { Server } from 'http';
+import { app } from './app';
 import { connectDB } from './config/db';
+import { validateAuthConfig } from './config/auth.config';
 
-import adminRoutes from './routes/admin.routes';
-import alumnosRoutes from './routes/alumnos.routes';
-import authRoutes from './routes/auth.routes';
-import carrerasRoutes from './routes/carreras.routes';
-import comisionesRoutes from './routes/comisiones.routes';
-import divisionesRoutes from './routes/divisiones.routes';
-import docentesRoutes from './routes/docentes.routes';
-import materiasRoutes from './routes/materias.routes';
-import actasRoutes from './routes/actas.routes';
-import evaluacionesRoutes from './routes/evaluaciones.routes';
-import intentosRoutes from './routes/intentos.routes';
-import telemetriaRoutes from './routes/telemetria.routes';
-import usuariosRoutes from './routes/usuarios.routes';
+const PORT = Number(process.env.PORT || 3000);
 
+export const startServer = async (): Promise<Server> => {
+  validateAuthConfig();
+  await connectDB();
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+  const server = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
 
-app.get('/', (req, res) => res.json({ message: 'API Node.js Online' }));
-app.use('/api/admin', adminRoutes);
-app.use('/api/alumnos', alumnosRoutes);
-app.use('/api/auth', authRoutes);
-app.use('/api/carreras', carrerasRoutes);
-app.use('/api/comisiones', comisionesRoutes);
-app.use('/api/divisiones', divisionesRoutes);
-app.use('/api/docentes', docentesRoutes);
-app.use('/api/materias', materiasRoutes);
-app.use('/api/actas', actasRoutes);
-app.use('/api/evaluaciones', evaluacionesRoutes);
-app.use('/api/intentos', intentosRoutes);
-app.use('/api/telemetria', telemetriaRoutes);
-app.use('/api/usuarios', usuariosRoutes);
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`No se pudo iniciar Examio API: el puerto ${PORT} ya está ocupado.`);
+    } else {
+      console.error('No se pudo iniciar Examio API:', error);
+    }
+    process.exitCode = 1;
+  });
 
-const PORT = process.env.PORT || 3000;
+  return server;
+};
 
-connectDB().then(() => {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-});
+if (require.main === module) {
+  void startServer().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : 'Error desconocido';
+    console.error(`No se pudo iniciar Examio API: ${message}`);
+    process.exitCode = 1;
+  });
+}
 
 export { app };

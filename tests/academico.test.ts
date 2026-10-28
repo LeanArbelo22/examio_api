@@ -11,10 +11,13 @@ let app: any;
 let adminToken: string;
 let docenteToken: string;
 beforeAll(() => {
-  process.env.JWT_SECRET = 'test-secret-key';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-with-at-least-32-characters';
+  process.env.AUTH_REFRESH_TOKEN_SECRET = 'test-refresh-secret-key-with-at-least-32-characters';
   adminToken = jwt.sign({ id: 1, email: 'admin@test.com', role: 'admin' }, process.env.JWT_SECRET);
-  docenteToken = jwt.sign({ id: 2, email: 'docente@test.com', role: 'docente' }, process.env.JWT_SECRET);
-  app = require('../src/index').app;
+  docenteToken = jwt.sign({
+    id: 2, email: 'docente@test.com', role: 'docente', idDocente: 100542,
+  }, process.env.JWT_SECRET);
+  app = require('../src/app').app;
 });
 
 afterEach(() => {
@@ -568,11 +571,12 @@ describe('Docentes', () => {
       (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
         recordset: [
           {
-            IdPublicacion: 5, Titulo: 'Parcial I', Tipo: 'evaluacion',
+            IdPublicacion: 5, IdActividad: 25, IdMateria: 8, IdMateriaDivision: 17,
+            Titulo: 'Parcial I', Tipo: 'evaluacion',
             DuracionMinutos: 120, CantidadIntentosMaximos: 2, Estado: 'publicada',
             FechaInicio: new Date('2026-06-15T10:00:00Z'),
             FechaFin: new Date('2026-06-15T12:00:00Z'),
-            Materia: 'Bases de Datos I', Division: '1NMS',
+            Materia: 'Bases de Datos I', Division: '1NMS', Carrera: 'Analista de Sistemas',
             AlumnosInscriptos: 25, TotalIntentos: 10,
           },
         ],
@@ -585,12 +589,98 @@ describe('Docentes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data[0]).toEqual({
-        idPublicacion: 5, titulo: 'Parcial I', tipo: 'evaluacion',
+        idPublicacion: 5, idActividad: 25, idMateria: 8, idMateriaDivision: 17,
+        titulo: 'Parcial I', tipo: 'evaluacion',
         duracionMinutos: 120, cantidadIntentosMaximos: 2, estado: 'publicada',
         fechaInicio: expect.any(String), fechaFin: expect.any(String),
-        materia: 'Bases de Datos I', division: '1NMS',
+        materia: 'Bases de Datos I', division: '1NMS', carrera: 'Analista de Sistemas',
         alumnosInscriptos: 25, totalIntentos: 10,
       });
+      expect(reqBuilder.input).toHaveBeenCalledWith('Legajo', 'INT', '100542');
+      const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+      expect(sqlText).toContain('A.Id AS IdActividad');
+      expect(sqlText).toContain('M.Id AS IdMateria');
+      expect(sqlText).toContain('MD.Id AS IdMateriaDivision');
+      expect(sqlText).toContain('INNER JOIN Carrera C ON M.IdCarrera = C.Id');
+      expect(sqlText).toContain('WHERE MD.IdDocente = @Legajo');
+      expect(sqlText).toContain('ORDER BY P.FechaFin DESC');
+    });
+
+    it('mantiene una fila por publicación para varias evaluaciones de una comisión', async () => {
+      const reqBuilder = mock.pool.request();
+      (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+        recordset: [
+          { IdPublicacion: 5, IdActividad: 25, IdMateria: 8, IdMateriaDivision: 17, Titulo: 'Parcial I' },
+          { IdPublicacion: 6, IdActividad: 26, IdMateria: 8, IdMateriaDivision: 17, Titulo: 'Parcial II' },
+        ],
+      });
+
+      const res = await request(app)
+        .get('/api/docentes/100542/evaluaciones')
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(2);
+      expect(res.body.data.map((item: any) => item.idPublicacion)).toEqual([5, 6]);
+      expect(res.body.data.every((item: any) => item.idMateriaDivision === 17)).toBe(true);
+    });
+
+    it('distingue varias comisiones y materias homónimas de carreras diferentes por sus IDs', async () => {
+      const reqBuilder = mock.pool.request();
+      (reqBuilder.query as jest.Mock).mockResolvedValueOnce({
+        recordset: [
+          {
+            IdPublicacion: 7, IdActividad: 27, IdMateria: 8, IdMateriaDivision: 17,
+            Materia: 'Programación', Division: '1° A', Carrera: 'Analista de Sistemas',
+          },
+          {
+            IdPublicacion: 8, IdActividad: 28, IdMateria: 8, IdMateriaDivision: 18,
+            Materia: 'Programación', Division: '1° B', Carrera: 'Analista de Sistemas',
+          },
+          {
+            IdPublicacion: 9, IdActividad: 29, IdMateria: 12, IdMateriaDivision: 24,
+            Materia: 'Programación', Division: '1° A', Carrera: 'Tecnicatura en Redes',
+          },
+        ],
+      });
+
+      const res = await request(app)
+        .get('/api/docentes/100542/evaluaciones')
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((item: any) => ({
+        idMateria: item.idMateria,
+        idMateriaDivision: item.idMateriaDivision,
+        carrera: item.carrera,
+      }))).toEqual([
+        { idMateria: 8, idMateriaDivision: 17, carrera: 'Analista de Sistemas' },
+        { idMateria: 8, idMateriaDivision: 18, carrera: 'Analista de Sistemas' },
+        { idMateria: 12, idMateriaDivision: 24, carrera: 'Tecnicatura en Redes' },
+      ]);
+    });
+
+    it('impide que un docente consulte las evaluaciones de otro legajo', async () => {
+      const reqBuilder = mock.pool.request();
+      const res = await request(app)
+        .get('/api/docentes/999999/evaluaciones')
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('TEACHER_SCOPE_FORBIDDEN');
+      expect(reqBuilder.query).not.toHaveBeenCalled();
+    });
+
+    it('devuelve un array vacío cuando el docente no tiene evaluaciones', async () => {
+      const reqBuilder = mock.pool.request();
+      (reqBuilder.query as jest.Mock).mockResolvedValueOnce({ recordset: [] });
+
+      const res = await request(app)
+        .get('/api/docentes/100542/evaluaciones')
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, data: [] });
     });
 
     it('retorna 401 sin token de autenticación', async () => {

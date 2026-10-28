@@ -184,8 +184,9 @@ npx jest --detectOpenHandles
 - No usar `--forceExit` para ocultar handles.
 - Tras tests de infraestructura, verificar que 55803 no quede escuchando.
 
-Estado de referencia reciente: 26 suites y 513 tests pasan, también con
-`--runInBand --detectOpenHandles`.
+Estado de referencia reciente: 26 suites y 556 tests pasan con `--runInBand`.
+La infraestructura fue validada previamente con `--detectOpenHandles`; repetir
+esa comprobación al tocar arranque, conexiones, timers o recursos.
 Banco/evaluaciones agregan cobertura focalizada de aislamiento, estados,
 revisiones y copias. Las constraints y concurrencia de SQL Server requieren además
 verificación en una base aislada; los mocks no prueban esos comportamientos reales.
@@ -220,7 +221,8 @@ Convenciones:
 - Tests importan `src/app.ts`; Jest finaliza naturalmente y deja 55803 libre.
 - Módulo de reportes agregado: rendimiento individual/listado, filtros,
   paginación, alcance docente y síntesis institucional administrativa por
-  carrera/materia/comisión, con comparativas y serie mensual en v1.2.0.
+  carrera/materia/comisión. v1.3.0 conserva v1.2.0 y agrega dirección exacta del
+  ranking y serie temporal mensual/semestral/anual.
 - Borradores incompletos, publicación completa, referencias al banco e idempotencia
   persistente requieren la migración `20260926_evaluacion_revision_idempotencia.sql`.
 - La migración `20261011_calificacion_intentos_telemetria.sql` fue aplicada dos veces y

@@ -230,7 +230,7 @@ un elemento rechazado o en conflicto no revierte los elementos válidos.
 No se aplica una etiqueta de “diferencia significativa” entre variantes hasta acordar un
 umbral o método estadístico. El contrato expone diferencia porcentual y tamaño de muestra.
 
-### Entregas 1 y 2 — análisis docente e institucional v1.1.0 / v1.2.0
+### Entregas 1 y 2 — análisis docente e institucional v1.1.0 / v1.3.0
 
 - [x] Cerrar contrato en `docs/CONTRATO_REPORTES_DOCENTE_V1.md`.
 - [x] Agregar resultados oficiales y pendientes operativos sin alterar campos/gráfico legacy.
@@ -242,6 +242,9 @@ umbral o método estadístico. El contrato expone diferencia porcentual y tamañ
 - [x] Ampliar la síntesis institucional con carrera, comparativas completas y serie
   mensual de hasta 60 meses, según
   `docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_2.md`.
+- [x] Agregar dirección autoritativa del ranking y serie temporal mensual,
+  semestral o anual, manteniendo compatible v1.2.0, según
+  `docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_3.md`.
 - [ ] Comparar planes con un volumen representativo; la base de prueba sigue siendo pequeña.
 
 ## Evolución — etapa 5: políticas y sesiones de revisión

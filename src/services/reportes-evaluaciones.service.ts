@@ -119,6 +119,13 @@ export type ReportSeriesPeriod = {
   mesesCalendarioIncluidos: number;
 };
 
+export class InvalidGradingScaleError extends Error {
+  constructor() {
+    super('Existen resultados oficiales con una escala de calificación inválida');
+    this.name = 'InvalidGradingScaleError';
+  }
+}
+
 const orderingMap: Record<RendimientoEvaluacionesQuery['ordenarPor'], string> = {
   evaluacion: 'Titulo',
   fecha: 'FechaInicio',
@@ -130,18 +137,49 @@ const orderingMap: Record<RendimientoEvaluacionesQuery['ordenarPor'], string> = 
 
 const numberValue = (value: unknown): number => Number(value ?? 0);
 
+const bigintValue = (value: unknown): bigint => {
+  if (value === null || value === undefined || value === '') return 0n;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') return BigInt(Math.trunc(value));
+  return BigInt(String(value));
+};
+
+const officialAccumulator = Symbol('officialAccumulator');
+
+type OfficialAccumulator = {
+  sumaNotaBase10Milesimas: bigint;
+  cantidadNotasBase10: number;
+};
+
+const promedioNotaBase10 = (
+  sumaNotaBase10Milesimas: bigint,
+  resultadosConsiderados: number,
+): number | null => {
+  if (resultadosConsiderados === 0) return null;
+  const divisor = BigInt(resultadosConsiderados) * 1000n;
+  const centesimas = (sumaNotaBase10Milesimas * 100n + divisor / 2n) / divisor;
+  return Number(centesimas) / 100;
+};
+
 const porcentaje = (numerador: number, denominador: number): number | null =>
   denominador === 0 ? null : Math.round((numerador * 10000) / denominador) / 100;
 
 const extraerBloquesDocentes = (source: Record<string, unknown>) => {
   const intentosValidosEntregados = numberValue(source.oficialIntentosValidosEntregados);
   const resultadosConsiderados = numberValue(source.oficialResultadosConsiderados);
+  const accumulator: OfficialAccumulator = {
+    sumaNotaBase10Milesimas: bigintValue(source.oficialSumaNotaBase10Milesimas),
+    cantidadNotasBase10: numberValue(source.oficialCantidadNotasBase10),
+  };
+  const intentosPendientesConfirmacion =
+    numberValue(source.oficialIntentosPendientesConfirmacion);
+  const intentosConfirmadosSinNota = numberValue(source.oficialIntentosConfirmadosSinNota);
   const resultadosOficiales = {
     intentosValidosEntregados,
     resultadosConsiderados,
-    resultadosPendientes: numberValue(source.oficialResultadosPendientes),
-    intentosPendientesConfirmacion: numberValue(source.oficialIntentosPendientesConfirmacion),
-    intentosConfirmadosSinNota: numberValue(source.oficialIntentosConfirmadosSinNota),
+    resultadosPendientes: intentosPendientesConfirmacion + intentosConfirmadosSinNota,
+    intentosPendientesConfirmacion,
+    intentosConfirmadosSinNota,
     intentosConPreguntasSinPuntaje: numberValue(source.oficialIntentosConPreguntasSinPuntaje),
     preguntasSinPuntaje: numberValue(source.oficialPreguntasSinPuntaje),
     aprobados: numberValue(source.oficialAprobados),
@@ -154,6 +192,10 @@ const extraerBloquesDocentes = (source: Record<string, unknown>) => {
       resultadosConsiderados,
       intentosValidosEntregados,
     ),
+    promedioNotaBase10: promedioNotaBase10(
+      accumulator.sumaNotaBase10Milesimas,
+      resultadosConsiderados,
+    ),
   };
   const pendientesOperativos = {
     intentosEntregadosPendientes: numberValue(source.operativoIntentosEntregadosPendientes),
@@ -164,11 +206,13 @@ const extraerBloquesDocentes = (source: Record<string, unknown>) => {
   };
   const clean = Object.fromEntries(Object.entries(source).filter(([key]) =>
     !key.startsWith('oficial') && !key.startsWith('operativo')));
-  return { ...clean, resultadosOficiales, pendientesOperativos };
+  return { ...clean, resultadosOficiales, pendientesOperativos, [officialAccumulator]: accumulator };
 };
 
 type AggregateItem = ReturnType<typeof extraerBloquesDocentes>;
 type ComparisonDimension = 'carreras' | 'materias' | 'comisiones';
+type RankingOrder = 'aprobacion_asc' | 'aprobacion_desc';
+type SeriesGrouping = 'mensual' | 'semestral' | 'anual';
 
 const stableId = (item: AggregateItem, dimension: ComparisonDimension): number => {
   if (dimension === 'carreras') return numberValue(item.idCarrera);
@@ -182,10 +226,18 @@ const displayName = (item: AggregateItem, dimension: ComparisonDimension): strin
   return String(item.division ?? '');
 };
 
-const approvalRatio = (item: AggregateItem): number => {
-  const considered = item.resultadosOficiales.resultadosConsiderados;
-  return considered === 0 ? Number.POSITIVE_INFINITY
-    : item.resultadosOficiales.aprobados / considered;
+const compareApprovalExact = (
+  left: AggregateItem,
+  right: AggregateItem,
+  order: RankingOrder,
+): number => {
+  const leftProduct = BigInt(Math.trunc(left.resultadosOficiales.aprobados)) *
+    BigInt(Math.trunc(right.resultadosOficiales.resultadosConsiderados));
+  const rightProduct = BigInt(Math.trunc(right.resultadosOficiales.aprobados)) *
+    BigInt(Math.trunc(left.resultadosOficiales.resultadosConsiderados));
+  if (leftProduct === rightProduct) return 0;
+  const ascending = leftProduct < rightProduct ? -1 : 1;
+  return order === 'aprobacion_asc' ? ascending : -ascending;
 };
 
 const buildComparison = (
@@ -193,6 +245,7 @@ const buildComparison = (
   dimension: ComparisonDimension,
   minimumSample: number,
   minimumCoverage: number,
+  order: RankingOrder,
 ) => {
   const eligible: AggregateItem[] = [];
   const limited: Array<AggregateItem & { motivosNoElegibilidad: string[] }> = [];
@@ -220,7 +273,7 @@ const buildComparison = (
   });
 
   eligible.sort((left, right) =>
-    approvalRatio(left) - approvalRatio(right) ||
+    compareApprovalExact(left, right, order) ||
     right.resultadosOficiales.resultadosConsiderados -
       left.resultadosOficiales.resultadosConsiderados ||
     stableId(left, dimension) - stableId(right, dimension));
@@ -317,6 +370,123 @@ const buildMonthlySeries = (
       publicacionesConResultadosPendientes:
         numberValue(aggregate.publicacionesConResultadosPendientes),
       resultadosOficiales: aggregate.resultadosOficiales,
+      [officialAccumulator]: aggregate[officialAccumulator],
+    };
+  });
+};
+
+type MonthlySeriesPoint = ReturnType<typeof buildMonthlySeries>[number];
+
+const addOfficialResults = (points: MonthlySeriesPoint[]) => {
+  const sum = (key: keyof MonthlySeriesPoint['resultadosOficiales']): number =>
+    points.reduce((total, point) => {
+      const value = point.resultadosOficiales[key];
+      return total + (typeof value === 'number' ? value : 0);
+    }, 0);
+  const intentosValidosEntregados = sum('intentosValidosEntregados');
+  const resultadosConsiderados = sum('resultadosConsiderados');
+  const sumaNotaBase10Milesimas = points.reduce(
+    (total, point) => total + point[officialAccumulator].sumaNotaBase10Milesimas,
+    0n,
+  );
+  return {
+    intentosValidosEntregados,
+    resultadosConsiderados,
+    resultadosPendientes: sum('resultadosPendientes'),
+    intentosPendientesConfirmacion: sum('intentosPendientesConfirmacion'),
+    intentosConfirmadosSinNota: sum('intentosConfirmadosSinNota'),
+    intentosConPreguntasSinPuntaje: sum('intentosConPreguntasSinPuntaje'),
+    preguntasSinPuntaje: sum('preguntasSinPuntaje'),
+    aprobados: sum('aprobados'),
+    desaprobados: sum('desaprobados'),
+    porcentajeAprobacion: porcentaje(sum('aprobados'), resultadosConsiderados),
+    porcentajeCoberturaConfirmada: porcentaje(
+      resultadosConsiderados,
+      intentosValidosEntregados,
+    ),
+    promedioNotaBase10: promedioNotaBase10(
+      sumaNotaBase10Milesimas,
+      resultadosConsiderados,
+    ),
+  };
+};
+
+const periodIdentity = (
+  monthLabel: string,
+  grouping: SeriesGrouping,
+): { periodo: string; etiqueta: string; year: number; startMonth: number; monthCount: number } => {
+  const [year, month] = monthLabel.split('-').map(Number);
+  if (grouping === 'mensual') {
+    const monthName = new Intl.DateTimeFormat('es-AR', {
+      timeZone: 'UTC',
+      month: 'long',
+      year: 'numeric',
+    }).format(new Date(Date.UTC(year, month - 1, 1)));
+    return { periodo: monthLabel, etiqueta: monthName, year, startMonth: month - 1, monthCount: 1 };
+  }
+  if (grouping === 'semestral') {
+    const semester = month <= 6 ? 1 : 2;
+    return {
+      periodo: `${year}-S${semester}`,
+      etiqueta: `${semester === 1 ? 'enero-junio' : 'julio-diciembre'} ${year}`,
+      year,
+      startMonth: semester === 1 ? 0 : 6,
+      monthCount: 6,
+    };
+  }
+  return {
+    periodo: String(year),
+    etiqueta: String(year),
+    year,
+    startMonth: 0,
+    monthCount: 12,
+  };
+};
+
+const buildTemporalSeries = (
+  monthlyPoints: MonthlySeriesPoint[],
+  period: ReportSeriesPeriod,
+  grouping: SeriesGrouping,
+) => {
+  const buckets = new Map<string, {
+    identity: ReturnType<typeof periodIdentity>;
+    points: MonthlySeriesPoint[];
+  }>();
+  monthlyPoints.forEach(point => {
+    const identity = periodIdentity(point.periodo, grouping);
+    const existing = buckets.get(identity.periodo);
+    if (existing) existing.points.push(point);
+    else buckets.set(identity.periodo, { identity, points: [point] });
+  });
+
+  return Array.from(buckets.values()).map(({ identity, points }) => {
+    const calendarFrom = localMonthBoundaryUtc(identity.year, identity.startMonth);
+    const calendarToExclusive = localMonthBoundaryUtc(
+      identity.year,
+      identity.startMonth + identity.monthCount,
+    );
+    const effectiveFrom = Math.max(calendarFrom, period.desde.getTime());
+    const effectiveTo = Math.min(calendarToExclusive - 1, period.hasta.getTime());
+    return {
+      periodo: identity.periodo,
+      etiqueta: identity.etiqueta,
+      limitesCalendario: {
+        desde: new Date(calendarFrom).toISOString(),
+        hastaExclusivo: new Date(calendarToExclusive).toISOString(),
+      },
+      limitesEfectivos: {
+        desde: new Date(effectiveFrom).toISOString(),
+        hasta: new Date(effectiveTo).toISOString(),
+      },
+      periodoCompleto: period.desde.getTime() <= calendarFrom &&
+        period.hasta.getTime() >= calendarToExclusive - 1 &&
+        period.ahora.getTime() >= calendarToExclusive,
+      publicaciones: points.reduce((total, point) => total + point.publicaciones, 0),
+      publicacionesConResultadosPendientes: points.reduce(
+        (total, point) => total + point.publicacionesConResultadosPendientes,
+        0,
+      ),
+      resultadosOficiales: addOfficialResults(points),
     };
   });
 };
@@ -371,7 +541,9 @@ export const getRendimientoEvaluacionesReport = async (
     : filters.conIncidentes === false
       ? 'DELETE FROM #ReporteEvaluaciones WHERE TotalIncidentes>0;'
       : '';
-  const monthlyInstitutionalSql = filters.incluirSerieMensual === true ? `
+  const needsMonthlyRows = filters.incluirSerieMensual === true ||
+    filters.agrupacionSerie !== undefined;
+  const monthlyInstitutionalSql = needsMonthlyRows ? `
     SELECT
       CONVERT(char(7),CAST(
         FechaInicio AT TIME ZONE 'UTC' AT TIME ZONE 'Argentina Standard Time'
@@ -390,7 +562,9 @@ export const getRendimientoEvaluacionesReport = async (
         AS OficialIntentosConPreguntasSinPuntaje,
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
-      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados
+      COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10
     FROM #ReporteEvaluaciones
     GROUP BY CONVERT(char(7),CAST(
       FechaInicio AT TIME ZONE 'UTC' AT TIME ZONE 'Argentina Standard Time'
@@ -416,6 +590,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
       COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10,
       COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
@@ -444,6 +620,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
       COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10,
       COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
@@ -474,6 +652,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
       COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10,
       COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
@@ -504,6 +684,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
       COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10,
       COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
@@ -570,7 +752,8 @@ export const getRendimientoEvaluacionesReport = async (
     GROUP BY I.Id;
 
     SELECT X.IdPublicacion,X.IdAlumno,IV.Id AS IdIntento,IV.CorreccionConfirmada,
-      IV.NotaFinal,PA.NotaAprobacion,COALESCE(PPI.PreguntasSinPuntaje,0) AS PreguntasSinPuntaje
+      IV.NotaFinal,PA.NotaAprobacion,PA.EscalaCalificacion,
+      COALESCE(PPI.PreguntasSinPuntaje,0) AS PreguntasSinPuntaje
     INTO #IntentosValidosOficiales
     FROM (
       SELECT DISTINCT I.IdPublicacion,I.IdAlumno
@@ -609,11 +792,28 @@ export const getRendimientoEvaluacionesReport = async (
       SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
         AND O.NotaFinal>=O.NotaAprobacion THEN 1 ELSE 0 END) AS OficialAprobados,
       SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
-        AND O.NotaFinal<O.NotaAprobacion THEN 1 ELSE 0 END) AS OficialDesaprobados
+        AND O.NotaFinal<O.NotaAprobacion THEN 1 ELSE 0 END) AS OficialDesaprobados,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.EscalaCalificacion IN (10,100)
+        THEN CONVERT(BIGINT,O.NotaFinal*10000/O.EscalaCalificacion) ELSE 0 END),0)
+        AS OficialSumaNotaBase10Milesimas,
+      SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.EscalaCalificacion IN (10,100) THEN 1 ELSE 0 END)
+        AS OficialCantidadNotasBase10,
+      SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND (O.EscalaCalificacion IS NULL OR O.EscalaCalificacion NOT IN (10,100))
+        THEN 1 ELSE 0 END) AS OficialEscalasInvalidas
     INTO #ResultadosOficiales
     FROM #PublicacionesAlcanzadas PA
     LEFT JOIN #IntentosValidosOficiales O ON O.IdPublicacion=PA.IdPublicacion
     GROUP BY PA.IdPublicacion;
+
+    IF EXISTS (
+      SELECT 1 FROM #ResultadosOficiales
+      WHERE OficialEscalasInvalidas>0
+        OR OficialCantidadNotasBase10<>OficialResultadosConsiderados
+    )
+      THROW 51050, 'REPORT_INVALID_GRADING_SCALE', 1;
 
     SELECT PA.IdPublicacion,
       COUNT(DISTINCT CASE WHEN I.Estado='entregado' AND (
@@ -712,6 +912,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(RO.OficialPreguntasSinPuntaje,0) AS OficialPreguntasSinPuntaje,
       COALESCE(RO.OficialAprobados,0) AS OficialAprobados,
       COALESCE(RO.OficialDesaprobados,0) AS OficialDesaprobados,
+      COALESCE(RO.OficialSumaNotaBase10Milesimas,0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(RO.OficialCantidadNotasBase10,0) AS OficialCantidadNotasBase10,
       COALESCE(PO.OperativoIntentosEntregadosPendientes,0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(PO.OperativoIntentosPendientesConfirmacion,0)
@@ -774,6 +976,8 @@ export const getRendimientoEvaluacionesReport = async (
       COALESCE(SUM(OficialPreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
       COALESCE(SUM(OficialAprobados),0) AS OficialAprobados,
       COALESCE(SUM(OficialDesaprobados),0) AS OficialDesaprobados,
+      COALESCE(SUM(OficialSumaNotaBase10Milesimas),0) AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(OficialCantidadNotasBase10),0) AS OficialCantidadNotasBase10,
       COALESCE(SUM(OperativoIntentosEntregadosPendientes),0)
         AS OperativoIntentosEntregadosPendientes,
       COALESCE(SUM(OperativoIntentosPendientesConfirmacion),0)
@@ -857,6 +1061,8 @@ export const getRendimientoEvaluacionesReport = async (
       OficialPreguntasSinPuntaje,
       OficialAprobados,
       OficialDesaprobados,
+      OficialSumaNotaBase10Milesimas,
+      OficialCantidadNotasBase10,
       OperativoIntentosEntregadosPendientes,
       OperativoIntentosPendientesConfirmacion,
       OperativoIntentosSinNotaFinal,
@@ -867,7 +1073,13 @@ export const getRendimientoEvaluacionesReport = async (
     OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY;
 
     SELECT COUNT(*) AS Total FROM #ReporteEvaluaciones;
-  `);
+  `).catch((error: unknown) => {
+    const sqlError = error as { number?: number; message?: string };
+    if (sqlError.number === 51050 || sqlError.message?.includes('REPORT_INVALID_GRADING_SCALE')) {
+      throw new InvalidGradingScaleError();
+    }
+    throw error;
+  });
 
   const recordsets = result.recordsets || [];
   const kpiRows = recordsets[0] || [];
@@ -879,8 +1091,8 @@ export const getRendimientoEvaluacionesReport = async (
     const carreraRows = recordsets[3] || [];
     const materiaRows = recordsets[4] || [];
     const comisionRows = recordsets[5] || [];
-    const monthlyRows = filters.incluirSerieMensual === true ? recordsets[6] || [] : [];
-    evaluationIndex = filters.incluirSerieMensual === true ? 7 : 6;
+    const monthlyRows = needsMonthlyRows ? recordsets[6] || [] : [];
+    evaluationIndex = needsMonthlyRows ? 7 : 6;
     const comisiones = (mapKeysToCamelCase(comisionRows) as Array<Record<string, unknown>>)
       .map(extraerBloquesDocentes);
     const materias = (mapKeysToCamelCase(materiaRows) as Array<Record<string, unknown>>)
@@ -900,6 +1112,10 @@ export const getRendimientoEvaluacionesReport = async (
     }));
     const minimumSample = filters.muestraMinimaRanking ?? 10;
     const minimumCoverage = filters.coberturaMinimaRanking ?? 70;
+    const rankingOrder = filters.ordenRanking ?? 'aprobacion_asc';
+    const monthlySeries = needsMonthlyRows && seriesPeriod
+      ? buildMonthlySeries(monthlyRows, seriesPeriod)
+      : [];
     resumenInstitucional = {
       unidadEvaluacion: 'idPublicacion',
       dimensionTemporal: 'publicacion.fechaInicio',
@@ -909,24 +1125,36 @@ export const getRendimientoEvaluacionesReport = async (
       materias,
       carreras,
       comparativas: {
+        ...(filters.ordenRanking !== undefined ? { ordenRanking: rankingOrder } : {}),
         criteriosElegibilidad: {
           muestraMinima: minimumSample,
           coberturaMinimaPorcentaje: minimumCoverage,
           naturaleza: 'criterio_operativo_configurable',
         },
-        carreras: buildComparison(carrerasBase, 'carreras', minimumSample, minimumCoverage),
+        carreras: buildComparison(
+          carrerasBase, 'carreras', minimumSample, minimumCoverage, rankingOrder,
+        ),
         materias: buildComparison(materias.map(({ comisiones: _comisiones, ...materia }) => materia),
-          'materias', minimumSample, minimumCoverage),
-        comisiones: buildComparison(comisiones, 'comisiones', minimumSample, minimumCoverage),
+          'materias', minimumSample, minimumCoverage, rankingOrder),
+        comisiones: buildComparison(
+          comisiones, 'comisiones', minimumSample, minimumCoverage, rankingOrder,
+        ),
       },
-      ...(filters.incluirSerieMensual === true && seriesPeriod ? {
+      ...(needsMonthlyRows && seriesPeriod ? {
         periodoEfectivo: {
           desde: seriesPeriod.desde.toISOString(),
           hasta: seriesPeriod.hasta.toISOString(),
           zonaHoraria: REPORT_TIME_ZONE,
           mesesCalendarioIncluidos: seriesPeriod.mesesCalendarioIncluidos,
         },
-        serieMensual: buildMonthlySeries(monthlyRows, seriesPeriod),
+        ...(filters.incluirSerieMensual === true ? { serieMensual: monthlySeries } : {}),
+        ...(filters.agrupacionSerie !== undefined ? {
+          serieTemporal: {
+            agrupacion: filters.agrupacionSerie,
+            zonaHoraria: REPORT_TIME_ZONE,
+            puntos: buildTemporalSeries(monthlySeries, seriesPeriod, filters.agrupacionSerie),
+          },
+        } : {}),
       } : {}),
     };
   }
@@ -955,6 +1183,12 @@ export const getRendimientoEvaluacionesReport = async (
         : {}),
       ...(filters.incluirSerieMensual !== undefined
         ? { incluirSerieMensual: filters.incluirSerieMensual }
+        : {}),
+      ...(filters.agrupacionSerie !== undefined
+        ? { agrupacionSerie: filters.agrupacionSerie }
+        : {}),
+      ...(filters.ordenRanking !== undefined
+        ? { ordenRanking: filters.ordenRanking }
         : {}),
       ...(filters.incluirResumenInstitucional === true ? {
         muestraMinimaRanking: filters.muestraMinimaRanking ?? 10,

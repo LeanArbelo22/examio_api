@@ -1944,6 +1944,8 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 | `soloIncidentesSinRevisar` | boolean | Con `true`, limita el alcance a incidentes operativamente pendientes |
 | `incluirResumenInstitucional` | boolean, default `false` | Sólo `admin`; agrega jerarquía y comparativas institucionales |
 | `incluirSerieMensual` | boolean, default `false` | Requiere resumen, `fechaDesde` y `fechaHasta`; máximo 60 meses calendario |
+| `agrupacionSerie` | enum opcional | `mensual`, `semestral` o `anual`; agrega `serieTemporal` y requiere período |
+| `ordenRanking` | enum opcional | `aprobacion_asc` o `aprobacion_desc`; independiente del orden de evaluaciones |
 | `muestraMinimaRanking` | entero, default `10` | Elegibilidad comparativa; entre 1 y 100000 |
 | `coberturaMinimaRanking` | decimal, default `70` | Elegibilidad comparativa; entre 0 y 100 |
 | `pagina` | entero, default `1` | Mínimo 1 |
@@ -2044,6 +2046,24 @@ admite hasta 60 meses calendario incluidos. Cada mes reutiliza
 `REPORT_SERIES_RANGE_TOO_LARGE`. Opciones institucionales sin resumen devuelven
 `REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY`; IDs jerárquicos incompatibles,
 `REPORT_FILTERS_INCONSISTENT`.
+
+La ampliación institucional **v1.3.0** agrega de forma optativa
+`ordenRanking` y `agrupacionSerie`. La dirección del ranking se calcula sobre la
+proporción exacta antes del redondeo, conservando los desempates por muestra e ID.
+`serieTemporal` agrupa por mes, semestre calendario o año en
+`America/Argentina/Buenos_Aires`, reutiliza una única agregación mensual, expone
+límites calendario/efectivos y recalcula porcentajes desde los conteos agregados.
+Sin los parámetros nuevos, el contrato v1.2.0 permanece sin campos adicionales.
+La especificación completa está en
+`docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_3.md`.
+
+La ampliación institucional **v1.4.0** agrega `promedioNotaBase10` a todos los
+objetos `resultadosOficiales`. Usa únicamente el intento válido entregado,
+confirmado y con nota final, normaliza escalas 10/100 y agrega sumas en milésimas
+antes de calcular niveles superiores. Sin resultados devuelve `null`; una escala
+oficial inválida falla con `REPORT_INVALID_GRADING_SCALE` y nunca produce un
+promedio parcial. No modifica los promedios legacy. Contrato completo:
+`docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_4.md`.
 
 #### Response
 
@@ -2308,8 +2328,10 @@ El contrato docente e institucional base está versionado como **v1.1.0** en
 [`docs/CONTRATO_REPORTES_DOCENTE_V1.md`](docs/CONTRATO_REPORTES_DOCENTE_V1.md).
 Documenta los bloques oficiales paralelos, hallazgos, muestras/exclusiones y evidencia
 exacta por `claveContenido`, además del resumen administrativo por materia y comisión.
-La síntesis institucional ampliada está versionada como **v1.2.0** en
+La síntesis institucional base está versionada como **v1.2.0** en
 [`docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_2.md`](docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_2.md).
+La ampliación compatible vigente es **v1.3.0** y está documentada en
+[`docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_3.md`](docs/CONTRATO_REPORTES_INSTITUCIONALES_V1_3.md).
 
 - `estadoIntento`: `en_progreso|entregado|vencido|anulado`.
 - `alcanceIntentos`: `todos` (default) o `validos`. El segundo usa el override manual

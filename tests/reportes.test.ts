@@ -379,6 +379,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         OficialPreguntasSinPuntaje: 5,
         OficialAprobados: 18,
         OficialDesaprobados: 6,
+        OficialSumaNotaBase10Milesimas: '168000',
+        OficialCantidadNotasBase10: 24,
         OperativoIntentosEntregadosPendientes: 8,
         OperativoIntentosPendientesConfirmacion: 5,
         OperativoIntentosSinNotaFinal: 4,
@@ -438,6 +440,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         OficialPreguntasSinPuntaje: 5,
         OficialAprobados: 18,
         OficialDesaprobados: 6,
+        OficialSumaNotaBase10Milesimas: '168000',
+        OficialCantidadNotasBase10: 24,
         OperativoIntentosEntregadosPendientes: 8,
         OperativoIntentosPendientesConfirmacion: 5,
         OperativoIntentosSinNotaFinal: 4,
@@ -463,6 +467,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 5,
       OficialAprobados: 18,
       OficialDesaprobados: 6,
+      OficialSumaNotaBase10Milesimas: '168000',
+      OficialCantidadNotasBase10: 24,
       OperativoIntentosEntregadosPendientes: 8,
       OperativoIntentosPendientesConfirmacion: 5,
       OperativoIntentosSinNotaFinal: 4,
@@ -484,6 +490,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 3,
       OficialAprobados: 12,
       OficialDesaprobados: 4,
+      OficialSumaNotaBase10Milesimas: '112000',
+      OficialCantidadNotasBase10: 16,
       OperativoIntentosEntregadosPendientes: 5,
       OperativoIntentosPendientesConfirmacion: 3,
       OperativoIntentosSinNotaFinal: 2,
@@ -504,6 +512,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 2,
       OficialAprobados: 6,
       OficialDesaprobados: 2,
+      OficialSumaNotaBase10Milesimas: '56000',
+      OficialCantidadNotasBase10: 8,
       OperativoIntentosEntregadosPendientes: 3,
       OperativoIntentosPendientesConfirmacion: 2,
       OperativoIntentosSinNotaFinal: 2,
@@ -527,6 +537,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 3,
       OficialAprobados: 12,
       OficialDesaprobados: 4,
+      OficialSumaNotaBase10Milesimas: '112000',
+      OficialCantidadNotasBase10: 16,
       OperativoIntentosEntregadosPendientes: 5,
       OperativoIntentosPendientesConfirmacion: 3,
       OperativoIntentosSinNotaFinal: 2,
@@ -549,6 +561,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 2,
       OficialAprobados: 6,
       OficialDesaprobados: 2,
+      OficialSumaNotaBase10Milesimas: '56000',
+      OficialCantidadNotasBase10: 8,
       OperativoIntentosEntregadosPendientes: 3,
       OperativoIntentosPendientesConfirmacion: 2,
       OperativoIntentosSinNotaFinal: 2,
@@ -574,6 +588,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 3,
       OficialAprobados: 12,
       OficialDesaprobados: 4,
+      OficialSumaNotaBase10Milesimas: '112000',
+      OficialCantidadNotasBase10: 16,
       OperativoIntentosEntregadosPendientes: 5,
       OperativoIntentosPendientesConfirmacion: 3,
       OperativoIntentosSinNotaFinal: 2,
@@ -598,6 +614,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       OficialPreguntasSinPuntaje: 2,
       OficialAprobados: 6,
       OficialDesaprobados: 2,
+      OficialSumaNotaBase10Milesimas: '56000',
+      OficialCantidadNotasBase10: 8,
       OperativoIntentosEntregadosPendientes: 3,
       OperativoIntentosPendientesConfirmacion: 2,
       OperativoIntentosSinNotaFinal: 2,
@@ -619,6 +637,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     OficialPreguntasSinPuntaje: 0,
     OficialAprobados: 5,
     OficialDesaprobados: 5,
+    OficialSumaNotaBase10Milesimas: '50000',
+    OficialCantidadNotasBase10: 10,
     OperativoIntentosEntregadosPendientes: 0,
     OperativoIntentosPendientesConfirmacion: 0,
     OperativoIntentosSinNotaFinal: 0,
@@ -671,12 +691,82 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     });
     expect(res.body.data.kpis.resultadosOficiales)
       .toEqual(res.body.data.evaluaciones[0].resultadosOficiales);
+    expect(res.body.data.kpis.resultadosOficiales.promedioNotaBase10).toBe(7);
+    expect(res.body.data.kpis).not.toHaveProperty('oficialSumaNotaBase10Milesimas');
+    expect(res.body.data.evaluaciones[0]).not.toHaveProperty('oficialSumaNotaBase10Milesimas');
     expect(res.body.data.paginacion).toEqual({ pagina: 1, limite: 20, total: 12, totalPaginas: 1 });
     expect(reqBuilder.input).toHaveBeenCalledWith('IdDocente', 'INT', 100542);
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText).toContain('MD.IdDocente = @IdDocente');
     expect(sqlText.indexOf('INTO #IntentosValidosOficiales'))
       .toBeLessThan(sqlText.indexOf('CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL'));
+    expect(sqlText).toContain('IV.NotaFinal,PA.NotaAprobacion,PA.EscalaCalificacion');
+    expect(sqlText).toContain('CONVERT(BIGINT,O.NotaFinal*10000/O.EscalaCalificacion)');
+    expect(sqlText).toContain('OficialCantidadNotasBase10<>OficialResultadosConsiderados');
+  });
+
+  it('calcula el promedio oficial ponderado y normalizado sin promediar publicaciones', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      kpis: aggregateFixture({
+        OficialIntentosValidosEntregados: 5,
+        OficialResultadosConsiderados: 3,
+        OficialResultadosPendientes: 2,
+        OficialIntentosPendientesConfirmacion: 1,
+        OficialIntentosConfirmadosSinNota: 1,
+        OficialAprobados: 2,
+        OficialDesaprobados: 1,
+        OficialSumaNotaBase10Milesimas: '19000',
+        OficialCantidadNotasBase10: 3,
+      }),
+      rows: [{
+        IdPublicacion: 47,
+        OficialIntentosValidosEntregados: 5,
+        OficialResultadosConsiderados: 3,
+        OficialIntentosPendientesConfirmacion: 1,
+        OficialIntentosConfirmadosSinNota: 1,
+        OficialAprobados: 2,
+        OficialDesaprobados: 1,
+        OficialSumaNotaBase10Milesimas: '19000',
+        OficialCantidadNotasBase10: 3,
+      }],
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.kpis.resultadosOficiales).toMatchObject({
+      resultadosConsiderados: 3,
+      resultadosPendientes: 2,
+      aprobados: 2,
+      desaprobados: 1,
+      promedioNotaBase10: 6.33,
+    });
+    expect(res.body.data.evaluaciones[0].resultadosOficiales.promedioNotaBase10).toBe(6.33);
+    expect(JSON.stringify(res.body)).not.toContain('SumaNotaBase10Milesimas');
+    expect(JSON.stringify(res.body)).not.toContain('CantidadNotasBase10');
+  });
+
+  it('devuelve REPORT_INVALID_GRADING_SCALE sin exponer el error SQL', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockRejectedValueOnce({
+      number: 51050,
+      message: 'REPORT_INVALID_GRADING_SCALE: detalle interno',
+    });
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      success: false,
+      code: 'REPORT_INVALID_GRADING_SCALE',
+      message: 'Existen resultados oficiales con una escala de calificación inválida',
+    });
+    expect(JSON.stringify(res.body)).not.toContain('detalle interno');
   });
 
   it('permite al administrador consultar el alcance institucional sin filtro docente', async () => {
@@ -730,6 +820,7 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
           desaprobados: 6,
           porcentajeAprobacion: 75,
           porcentajeCoberturaConfirmada: 80,
+          promedioNotaBase10: 7,
         },
         pendientesOperativos: {
           intentosEntregadosPendientes: 8,
@@ -747,12 +838,16 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       idMateria: 5,
       materia: 'Bases de Datos',
       publicaciones: 2,
-      resultadosOficiales: { resultadosConsiderados: 16, porcentajeAprobacion: 75 },
+      resultadosOficiales: {
+        resultadosConsiderados: 16,
+        porcentajeAprobacion: 75,
+        promedioNotaBase10: 7,
+      },
       comisiones: [{
         idMateriaDivision: 12,
         idMateria: 5,
         idCarrera: 1,
-        resultadosOficiales: { resultadosConsiderados: 16 },
+        resultadosOficiales: { resultadosConsiderados: 16, promedioNotaBase10: 7 },
         pendientesOperativos: { intentosEntregadosPendientes: 5 },
       }],
     });
@@ -775,7 +870,11 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         naturaleza: 'criterio_operativo_configurable',
       },
       carreras: {
-        elegibles: [{ idCarrera: 1, posicion: 1 }],
+        elegibles: [{
+          idCarrera: 1,
+          posicion: 1,
+          resultadosOficiales: { promedioNotaBase10: 7 },
+        }],
         evidenciaLimitada: [{
           idCarrera: 2,
           motivosNoElegibilidad: ['MUESTRA_INSUFICIENTE'],
@@ -856,6 +955,47 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     }]);
   });
 
+  it('ordena el ranking descendente por proporción exacta y conserva los desempates', async () => {
+    const reqBuilder = mock.pool.request();
+    const materias = [
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 10, Materia: 'Un tercio',
+        OficialIntentosValidosEntregados: 3, OficialResultadosConsiderados: 3,
+        OficialAprobados: 1, OficialDesaprobados: 2,
+      }),
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 11, Materia: 'Aproximación',
+        OficialIntentosValidosEntregados: 10000, OficialResultadosConsiderados: 10000,
+        OficialAprobados: 3333, OficialDesaprobados: 6667,
+      }),
+      aggregateFixture({
+        IdCarrera: 1, Carrera: 'Carrera Norte', IdMateria: 12, Materia: 'Dos sextos',
+        OficialIntentosValidosEntregados: 6, OficialResultadosConsiderados: 6,
+        OficialAprobados: 2, OficialDesaprobados: 4,
+      }),
+    ];
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        global: aggregateFixture(),
+        carreras: [aggregateFixture({ IdCarrera: 1, Carrera: 'Carrera Norte' })],
+        materias,
+        comisiones: [],
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&ordenRanking=aprobacion_desc&muestraMinimaRanking=1&coberturaMinimaRanking=0')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios.ordenRanking).toBe('aprobacion_desc');
+    expect(res.body.data.resumenInstitucional.comparativas.ordenRanking)
+      .toBe('aprobacion_desc');
+    expect(res.body.data.resumenInstitucional.comparativas.materias.elegibles
+      .map((item: any) => [item.idMateria, item.posicion]))
+      .toEqual([[12, 1], [10, 2], [11, 3]]);
+  });
+
   it('completa la serie mensual, distingue meses vacíos y marca períodos parciales', async () => {
     const reqBuilder = mock.pool.request();
     (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
@@ -904,6 +1044,224 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     ]);
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText).toContain("AT TIME ZONE 'Argentina Standard Time'");
+  });
+
+  it('agrega una serie semestral desde la misma base mensual y conserva la invariante oficial', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        ...institucional,
+        meses: [
+          aggregateFixture({
+            Periodo: '2025-12', Publicaciones: 1,
+            PublicacionesConResultadosPendientes: 1,
+            OficialIntentosValidosEntregados: 10,
+            OficialResultadosConsiderados: 8,
+            OficialResultadosPendientes: 2,
+            OficialIntentosPendientesConfirmacion: 1,
+            OficialIntentosConfirmadosSinNota: 1,
+            OficialAprobados: 4, OficialDesaprobados: 4,
+            OficialSumaNotaBase10Milesimas: '52000',
+            OficialCantidadNotasBase10: 8,
+          }),
+          aggregateFixture({
+            Periodo: '2026-01', Publicaciones: 2,
+            PublicacionesConResultadosPendientes: 1,
+            OficialIntentosValidosEntregados: 20,
+            OficialResultadosConsiderados: 17,
+            OficialResultadosPendientes: 3,
+            OficialIntentosPendientesConfirmacion: 2,
+            OficialIntentosConfirmadosSinNota: 1,
+            OficialAprobados: 0, OficialDesaprobados: 17,
+            OficialSumaNotaBase10Milesimas: '68000',
+            OficialCantidadNotasBase10: 17,
+          }),
+          aggregateFixture({
+            Periodo: '2026-02', Publicaciones: 1,
+            OficialIntentosValidosEntregados: 3,
+            OficialResultadosConsiderados: 3,
+            OficialResultadosPendientes: 0,
+            OficialIntentosPendientesConfirmacion: 0,
+            OficialIntentosConfirmadosSinNota: 0,
+            OficialAprobados: 3, OficialDesaprobados: 0,
+            OficialSumaNotaBase10Milesimas: '27000',
+            OficialCantidadNotasBase10: 3,
+          }),
+          aggregateFixture({
+            Periodo: '2026-07', Publicaciones: 3,
+            PublicacionesConResultadosPendientes: 2,
+            OficialIntentosValidosEntregados: 30,
+            OficialResultadosConsiderados: 25,
+            OficialResultadosPendientes: 5,
+            OficialIntentosPendientesConfirmacion: 4,
+            OficialIntentosConfirmadosSinNota: 1,
+            OficialAprobados: 20, OficialDesaprobados: 5,
+            OficialSumaNotaBase10Milesimas: '200000',
+            OficialCantidadNotasBase10: 25,
+          }),
+        ],
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&incluirSerieMensual=true&agrupacionSerie=semestral&fechaDesde=2025-11-15T03:00:00.000Z&fechaHasta=2026-08-15T02:59:59.999Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.criterios.agrupacionSerie).toBe('semestral');
+    expect(res.body.data.resumenInstitucional.serieMensual).toHaveLength(10);
+    expect(res.body.data.resumenInstitucional.serieTemporal).toMatchObject({
+      agrupacion: 'semestral',
+      zonaHoraria: 'America/Argentina/Buenos_Aires',
+      puntos: [
+        {
+          periodo: '2025-S2', periodoCompleto: false, publicaciones: 1,
+          limitesCalendario: {
+            desde: '2025-07-01T03:00:00.000Z',
+            hastaExclusivo: '2026-01-01T03:00:00.000Z',
+          },
+          resultadosOficiales: { resultadosPendientes: 2, promedioNotaBase10: 6.5 },
+        },
+        {
+          periodo: '2026-S1', periodoCompleto: true, publicaciones: 3,
+          resultadosOficiales: {
+            resultadosConsiderados: 20,
+            porcentajeAprobacion: 15,
+            resultadosPendientes: 3,
+            promedioNotaBase10: 4.75,
+          },
+        },
+        {
+          periodo: '2026-S2', periodoCompleto: false, publicaciones: 3,
+          resultadosOficiales: {
+            porcentajeAprobacion: 80,
+            resultadosPendientes: 5,
+            promedioNotaBase10: 8,
+          },
+        },
+      ],
+    });
+    for (const point of res.body.data.resumenInstitucional.serieTemporal.puntos) {
+      const official = point.resultadosOficiales;
+      expect(official.resultadosPendientes).toBe(
+        official.intentosPendientesConfirmacion + official.intentosConfirmadosSinNota,
+      );
+    }
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0] as string;
+    expect((sqlText.match(/AS Periodo,/g) || [])).toHaveLength(1);
+  });
+
+  it('genera la serie anual sin requerir la serie mensual legacy', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: { ...institucional, meses: [] },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&agrupacionSerie=anual&fechaDesde=2025-11-01T03:00:00.000Z&fechaHasta=2026-10-01T02:59:59.999Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.serieMensual).toBeUndefined();
+    expect(res.body.data.resumenInstitucional.serieTemporal.puntos.map((item: any) => item.periodo))
+      .toEqual(['2025', '2026']);
+    expect(res.body.data.resumenInstitucional.serieTemporal.puntos[0])
+      .toMatchObject({
+        periodoCompleto: false,
+        publicaciones: 0,
+        resultadosOficiales: {
+          resultadosConsiderados: 0,
+          porcentajeAprobacion: null,
+          porcentajeCoberturaConfirmada: null,
+        },
+      });
+  });
+
+  it('expone serieTemporal mensual sin alterar ni exigir serieMensual', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: {
+        ...institucional,
+        meses: [aggregateFixture({
+          Periodo: '2026-03', Publicaciones: 1,
+          OficialIntentosValidosEntregados: 10,
+          OficialResultadosConsiderados: 10,
+          OficialAprobados: 0,
+          OficialDesaprobados: 10,
+          OficialSumaNotaBase10Milesimas: '0',
+          OficialCantidadNotasBase10: 10,
+        })],
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&agrupacionSerie=mensual&fechaDesde=2026-03-01T03:00:00.000Z&fechaHasta=2026-05-01T02:59:59.999Z')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.serieMensual).toBeUndefined();
+    expect(res.body.data.resumenInstitucional.serieTemporal.puntos[0]).toMatchObject({
+      periodo: '2026-03',
+      limitesCalendario: {
+        desde: '2026-03-01T03:00:00.000Z',
+        hastaExclusivo: '2026-04-01T03:00:00.000Z',
+      },
+      limitesEfectivos: {
+        desde: '2026-03-01T03:00:00.000Z',
+        hasta: '2026-04-01T02:59:59.999Z',
+      },
+      periodoCompleto: true,
+      resultadosOficiales: { porcentajeAprobacion: 0, promedioNotaBase10: 0 },
+    });
+    expect(res.body.data.resumenInstitucional.serieTemporal.puntos[1]).toMatchObject({
+      periodo: '2026-04',
+      publicaciones: 0,
+      resultadosOficiales: {
+        resultadosConsiderados: 0,
+        porcentajeAprobacion: null,
+        promedioNotaBase10: null,
+      },
+    });
+  });
+
+  it('garantiza la invariante excluyente de resultados oficiales en todos los bloques', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      kpis: {
+        OficialResultadosPendientes: 999,
+        OficialIntentosPendientesConfirmacion: 7,
+        OficialIntentosConfirmadosSinNota: 3,
+      },
+      institutional: institucional,
+      rows: [{
+        IdPublicacion: 47,
+        OficialResultadosPendientes: 999,
+        OficialIntentosPendientesConfirmacion: 2,
+        OficialIntentosConfirmadosSinNota: 1,
+      }],
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    const officialBlocks = [
+      res.body.data.kpis.resultadosOficiales,
+      res.body.data.evaluaciones[0].resultadosOficiales,
+      res.body.data.resumenInstitucional.global.resultadosOficiales,
+      ...res.body.data.resumenInstitucional.carreras
+        .map((item: any) => item.resultadosOficiales),
+      ...res.body.data.resumenInstitucional.materias
+        .map((item: any) => item.resultadosOficiales),
+    ];
+    for (const official of officialBlocks) {
+      expect(official.resultadosPendientes).toBe(
+        official.intentosPendientesConfirmacion + official.intentosConfirmadosSinNota,
+      );
+    }
+    expect(res.body.data.kpis.resultadosOficiales.resultadosPendientes).toBe(10);
+    expect(res.body.data.evaluaciones[0].resultadosOficiales.resultadosPendientes).toBe(3);
   });
 
   it('acepta exactamente 60 meses calendario y genera la colección completa', async () => {
@@ -965,6 +1323,22 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     ],
     [
       'muestraMinimaRanking=10',
+      'REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY',
+    ],
+    [
+      'incluirResumenInstitucional=true&agrupacionSerie=semanal&fechaDesde=2026-01-01&fechaHasta=2026-02-01',
+      'REPORT_SERIES_GROUPING_INVALID',
+    ],
+    [
+      'incluirResumenInstitucional=true&agrupacionSerie=anual&fechaDesde=2020-01-01T03:00:00.000Z&fechaHasta=2025-01-01T03:00:00.000Z',
+      'REPORT_SERIES_RANGE_TOO_LARGE',
+    ],
+    [
+      'incluirResumenInstitucional=true&ordenRanking=alfabetico',
+      'REPORT_RANKING_ORDER_INVALID',
+    ],
+    [
+      'agrupacionSerie=anual&fechaDesde=2026-01-01&fechaHasta=2026-02-01',
       'REPORT_INSTITUTIONAL_OPTIONS_REQUIRE_SUMMARY',
     ],
   ])('devuelve el error institucional estable para %s', async (query, code) => {

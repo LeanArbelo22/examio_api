@@ -12,6 +12,7 @@ import {
 import {
   areEvaluationReportFiltersConsistent,
   getRendimientoEvaluacionesReport,
+  InvalidGradingScaleError,
   isEvaluationReportScopeAllowed,
   ReportSeriesPeriod,
 } from '../services/reportes-evaluaciones.service';
@@ -191,12 +192,30 @@ const seriesError = (res: Response, code: string, message: string) =>
 export const getRendimientoEvaluaciones = async (req: Request, res: Response) => {
   const parsed = RendimientoEvaluacionesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    if (req.query.incluirSerieMensual === 'true') {
+    if (req.query.ordenRanking !== undefined &&
+        !['aprobacion_asc', 'aprobacion_desc'].includes(String(req.query.ordenRanking))) {
+      return seriesError(
+        res,
+        'REPORT_RANKING_ORDER_INVALID',
+        'El orden del ranking no es válido',
+      );
+    }
+    if (req.query.agrupacionSerie !== undefined &&
+        !['mensual', 'semestral', 'anual'].includes(String(req.query.agrupacionSerie))) {
+      return seriesError(
+        res,
+        'REPORT_SERIES_GROUPING_INVALID',
+        'La agrupación temporal no es válida',
+      );
+    }
+    const solicitaSerie = req.query.incluirSerieMensual === 'true' ||
+      req.query.agrupacionSerie !== undefined;
+    if (solicitaSerie) {
       if (req.query.fechaDesde === undefined || req.query.fechaHasta === undefined) {
         return seriesError(
           res,
           'REPORT_SERIES_PERIOD_REQUIRED',
-          'La serie mensual requiere fechaDesde y fechaHasta',
+          'La serie temporal requiere fechaDesde y fechaHasta',
         );
       }
       if (parsed.error.issues.some(issue =>
@@ -204,7 +223,7 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
         return seriesError(
           res,
           'REPORT_SERIES_PERIOD_INVALID',
-          'El período de la serie mensual no es válido',
+          'El período de la serie temporal no es válido',
         );
       }
     }
@@ -220,6 +239,8 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
     const user = (req as any).user;
     const requestNow = new Date();
     const hasInstitutionalOptions = parsed.data.incluirSerieMensual === true ||
+      parsed.data.agrupacionSerie !== undefined ||
+      parsed.data.ordenRanking !== undefined ||
       parsed.data.muestraMinimaRanking !== undefined ||
       parsed.data.coberturaMinimaRanking !== undefined;
     if (hasInstitutionalOptions && parsed.data.incluirResumenInstitucional !== true) {
@@ -238,12 +259,14 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
     }
     let seriesPeriod: ReportSeriesPeriod | undefined;
     let effectiveFilters = parsed.data;
-    if (parsed.data.incluirSerieMensual === true) {
+    const solicitaSerie = parsed.data.incluirSerieMensual === true ||
+      parsed.data.agrupacionSerie !== undefined;
+    if (solicitaSerie) {
       if (!parsed.data.fechaDesde || !parsed.data.fechaHasta) {
         return seriesError(
           res,
           'REPORT_SERIES_PERIOD_REQUIRED',
-          'La serie mensual requiere fechaDesde y fechaHasta',
+          'La serie temporal requiere fechaDesde y fechaHasta',
         );
       }
       const requestedFrom = new Date(parsed.data.fechaDesde);
@@ -261,7 +284,7 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
         return seriesError(
           res,
           'REPORT_SERIES_RANGE_TOO_LARGE',
-          'La serie mensual admite hasta 60 meses calendario',
+          'La serie temporal admite hasta 60 meses calendario',
         );
       }
       seriesPeriod = {
@@ -309,7 +332,14 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
       seriesPeriod,
     );
     return res.json({ success: true, data });
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof InvalidGradingScaleError) {
+      return res.status(500).json({
+        success: false,
+        message: error.message,
+        code: 'REPORT_INVALID_GRADING_SCALE',
+      });
+    }
     return res.status(500).json({
       success: false,
       message: 'No se pudo obtener el rendimiento por evaluación',

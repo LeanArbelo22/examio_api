@@ -38,6 +38,8 @@ export const RendimientoEvaluacionesQuerySchema = z.object({
   soloIncidentesSinRevisar: optionalBoolean,
   incluirResumenInstitucional: optionalBoolean,
   incluirSerieMensual: optionalBoolean,
+  agrupacionSerie: z.enum(['mensual', 'semestral', 'anual']).optional(),
+  ordenRanking: z.enum(['aprobacion_asc', 'aprobacion_desc']).optional(),
   muestraMinimaRanking: z.preprocess(
     (value) => value === undefined ? undefined : Number(value),
     z.number().int().min(1).max(100000).optional(),

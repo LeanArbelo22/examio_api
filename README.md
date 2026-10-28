@@ -3252,20 +3252,3 @@ operación administrada separada.
 | `EVALUATION_ALREADY_PUBLISHED` | 400 | La actividad ya no es editable |
 | `EVALUATION_HAS_ATTEMPTS` | 409 | Existen intentos y la estructura es inmutable |
 
-### Migración y despliegue
-
-Después de `20260908_banco_preguntas.sql`, aplicar manualmente
-`migrations/20260926_evaluacion_revision_idempotencia.sql`. Agrega y rellena
-`Actividad.Revision`, y crea `OperacionIdempotente` con unicidad e índices. Ambas
-migraciones son aditivas, transaccionales e idempotentes; el backend nunca las ejecuta
-al arrancar. Repetirlas y ejecutar `scripts/verificar-banco-preguntas.sql` y
-`scripts/verificar-evaluacion-idempotencia.sql` primero sobre SQL Server aislado.
-Los tests Jest usan SQL mockeado y no sustituyen esas pruebas reales.
-
-Validación local de esta entrega: `npm test -- --runInBand` y
-`npx jest --runInBand --detectOpenHandles`, ambos con 26 suites/513 pruebas. El puerto
-55803 quedó libre. `npm run build` continúa bloqueado por la configuración TypeScript
-global preexistente (`rootDir` sin `include`, y después la incompatibilidad
-NodeNext/CommonJS/verbatim y tipos de `mssql` ya documentada). No se ejecutó SQL Server
-real ni se aplicaron migraciones: repetición de DDL, constraints, concurrencia,
-deadlocks y rollback real siguen pendientes en una base aislada autorizada.

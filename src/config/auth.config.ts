@@ -1,3 +1,4 @@
+// Este archivo contiene la configuración de autenticación y validación de variables de entorno relacionadas con la autenticación.
 const parsePositiveInteger = (name: string, defaultValue: number): number => {
   const rawValue = process.env[name];
   if (rawValue === undefined || rawValue === '') return defaultValue;

@@ -7,6 +7,8 @@ interface Counter {
   resetAt: number;
 }
 
+
+// Limita el numero de solicitudes por IP y por usuario para los endpoints de login y refresh token.
 const counters = new Map<string, Counter>();
 
 const consume = (key: string, windowSeconds: number, max: number): boolean => {

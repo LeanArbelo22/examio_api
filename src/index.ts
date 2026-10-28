@@ -12,7 +12,7 @@ export const startServer = async (): Promise<Server> => {
   await connectDB();
 
   const server = app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Servidor corriendo en el puerto ${PORT}`);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {

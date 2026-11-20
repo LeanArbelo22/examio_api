@@ -20,9 +20,12 @@ export const ReglaSupervisionSchema = z.object({
 }).strict();
 
 export const PoliticaSupervisionSchema = z.object({
-  PantallaCompletaObligatoria: z.boolean(),
   RevisionEsperada: z.number().int().min(0),
   Reglas: z.array(ReglaSupervisionSchema).max(50),
+  PantallaCompletaObligatoria: z.boolean(),
+  // nuevos campos para las capturas de la camara
+  CapturasHabilitadas: z.boolean().optional(),
+  IntervaloCapturasSegundos: z.number().int().min(30).max(300).optional(),
 }).strict().superRefine((value, ctx) => {
   const codigos = new Set<string>();
   value.Reglas.forEach((regla, index) => {

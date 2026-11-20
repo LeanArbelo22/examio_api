@@ -351,6 +351,10 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       comisiones: Record<string, unknown>[];
       meses?: Record<string, unknown>[];
     };
+    people?: {
+      rows: Record<string, unknown>[];
+      total: number;
+    };
   }) => ({
     recordsets: [
       [overrides?.kpis || {
@@ -410,6 +414,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         Materia: 'Bases de Datos',
         IdMateriaDivision: 12,
         Division: '2A',
+        IdDocente: 109000,
+        Docente: 'Florencia Balmaceda',
         FechaInicio: new Date('2026-08-01T12:00:00Z'),
         FechaFin: new Date('2026-08-01T14:00:00Z'),
         Estado: 'publicada',
@@ -449,6 +455,10 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         OperativoPreguntasSinPuntaje: 6,
       }],
       [{ Total: overrides?.total ?? 12 }],
+      ...(overrides?.people ? [
+        overrides.people.rows,
+        [{ Total: overrides.people.total }],
+      ] : []),
     ],
     recordset: [],
   });
@@ -576,6 +586,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       Materia: 'Bases de Datos',
       IdMateriaDivision: 12,
       Division: '2A',
+      IdDocente: 109000,
+      Docente: 'Florencia Balmaceda',
       Publicaciones: 2,
       PublicacionesConResultadosPendientes: 1,
       PublicacionesConPendientesOperativos: 1,
@@ -602,6 +614,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       Materia: 'Bases de Datos',
       IdMateriaDivision: 23,
       Division: '3B',
+      IdDocente: null,
+      Docente: null,
       Publicaciones: 1,
       PublicacionesConResultadosPendientes: 1,
       PublicacionesConPendientesOperativos: 1,
@@ -795,6 +809,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         Materia: 'Bases de Datos',
         IdMateriaDivision: 12,
         Division: '2A',
+        IdDocente: 109000,
+        Docente: 'Florencia Balmaceda',
       }],
       total: 3,
     }));
@@ -847,6 +863,8 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
         idMateriaDivision: 12,
         idMateria: 5,
         idCarrera: 1,
+        idDocente: 109000,
+        docente: 'Florencia Balmaceda',
         resultadosOficiales: { resultadosConsiderados: 16, promedioNotaBase10: 7 },
         pendientesOperativos: { intentosEntregadosPendientes: 5 },
       }],
@@ -855,7 +873,7 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
       idCarrera: 2,
       idMateria: 9,
       materia: 'Bases de Datos',
-      comisiones: [{ idMateriaDivision: 23 }],
+      comisiones: [{ idMateriaDivision: 23, idDocente: null, docente: null }],
     });
     expect(res.body.data.resumenInstitucional.carreras).toHaveLength(2);
     expect(res.body.data.resumenInstitucional.carreras[0]).toMatchObject({
@@ -889,14 +907,17 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     expect(res.body.data.evaluaciones[0]).toMatchObject({
       idCarrera: 1,
       carrera: 'Carrera Norte',
+      idDocente: 109000,
+      docente: 'Florencia Balmaceda',
     });
 
     const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
     expect(sqlText).toContain('INNER JOIN Carrera C ON C.Id = M.IdCarrera');
+    expect(sqlText).toContain('LEFT JOIN Docente DOC ON DOC.Legajo = MD.IdDocente');
     expect(sqlText).toContain('GROUP BY IdCarrera,Carrera,IdMateria,Materia');
     expect(sqlText).toContain('GROUP BY IdCarrera,Carrera');
     expect(sqlText).toContain(
-      'GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division',
+      'GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division,IdDocente,Docente',
     );
     expect(sqlText.indexOf('AS PublicacionesConResultadosPendientes'))
       .toBeLessThan(sqlText.indexOf('OFFSET @Offset'));
@@ -1418,6 +1439,266 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     expect(res.body.data.criterios.incluirResumenInstitucional).toBe(false);
   });
 
+  it.each(['matriculaAlumno=30500', 'legajoDocente=109000'])(
+    'rechaza para docente el filtro administrativo %s sin ejecutar SQL',
+    async query => {
+      const reqBuilder = mock.pool.request();
+      const res = await request(app)
+        .get(`/api/reportes/rendimiento-evaluaciones?${query}`)
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('REPORT_SCOPE_FORBIDDEN');
+      expect(reqBuilder.query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rechaza para alumno los filtros administrativos mediante el RBAC vigente', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?matriculaAlumno=30500&legajoDocente=109000')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('filtra por alumno y asignación docente actual antes de agregar y conserva totales entre páginas', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce(reportRecordsets({
+        institutional: institucional,
+        rows: [{ IdPublicacion: 47, IdDocente: 109000, Docente: 'Florencia Balmaceda' }],
+        total: 2,
+      }))
+      .mockResolvedValueOnce(reportRecordsets({
+        institutional: institucional,
+        rows: [{ IdPublicacion: 48, IdDocente: 109000, Docente: 'Florencia Balmaceda' }],
+        total: 2,
+      }));
+
+    const baseQuery = 'incluirResumenInstitucional=true&matriculaAlumno=30500&legajoDocente=109000&limite=1';
+    const first = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${baseQuery}&pagina=1`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    const second = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${baseQuery}&pagina=2`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.data.criterios).toMatchObject({
+      matriculaAlumno: 30500,
+      legajoDocente: 109000,
+    });
+    expect(first.body.data.evaluaciones).not.toEqual(second.body.data.evaluaciones);
+    expect(first.body.data.kpis).toEqual(second.body.data.kpis);
+    expect(first.body.data.resumenInstitucional).toEqual(second.body.data.resumenInstitucional);
+    expect(first.body.data.paginacion.total).toBe(2);
+    expect(second.body.data.paginacion.total).toBe(2);
+    expect(reqBuilder.input).toHaveBeenCalledWith('MatriculaAlumno', 'INT', 30500);
+    expect(reqBuilder.input).toHaveBeenCalledWith('LegajoDocente', 'INT', 109000);
+
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('AND MD.IdDocente = @LegajoDocente');
+    expect(sqlText).toContain('WHERE IFiltro.IdPublicacion=P.Id AND IFiltro.IdAlumno=@MatriculaAlumno');
+    expect(sqlText).toContain('AND IM.IdAlumno=@MatriculaAlumno');
+    expect(sqlText).toContain("WHERE I.Estado='entregado' AND I.IdAlumno=@MatriculaAlumno");
+    expect(sqlText).toContain('LEFT JOIN Intento I ON I.IdPublicacion=PA.IdPublicacion AND I.IdAlumno=@MatriculaAlumno');
+    expect(sqlText).toContain('LEFT JOIN Intento I ON I.IdPublicacion = PA.IdPublicacion AND I.IdAlumno=@MatriculaAlumno');
+  });
+
+  it('pagina alumnos después de calcular resultados oficiales e incluye alumnos sin resultados', async () => {
+    const reqBuilder = mock.pool.request();
+    const officialStudent = {
+      Matricula: 30500,
+      Nombre: 'Julieta',
+      Apellido: 'Acosta',
+      OficialIntentosValidosEntregados: 4,
+      OficialResultadosConsiderados: 3,
+      OficialResultadosPendientes: 1,
+      OficialIntentosPendientesConfirmacion: 1,
+      OficialIntentosConfirmadosSinNota: 0,
+      OficialIntentosConPreguntasSinPuntaje: 0,
+      OficialPreguntasSinPuntaje: 0,
+      OficialAprobados: 2,
+      OficialDesaprobados: 1,
+      OficialSumaNotaBase10Milesimas: '22500',
+      OficialCantidadNotasBase10: 3,
+    };
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce(reportRecordsets({
+        people: { rows: [officialStudent], total: 2 },
+      }))
+      .mockResolvedValueOnce(reportRecordsets({
+        people: { rows: [{ Matricula: 30501, Nombre: 'Pedro', Apellido: 'Gomez' }], total: 2 },
+      }));
+
+    const filters = 'resumenPersonas=alumnos&paginaPersonas=1&limitePersonas=1&idMateriaDivision=12&fechaDesde=2026-03-01&fechaHasta=2026-10-31';
+    const first = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${filters}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    const second = await request(app)
+      .get(`/api/reportes/rendimiento-evaluaciones?${filters.replace('paginaPersonas=1', 'paginaPersonas=2')}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(first.status).toBe(200);
+    expect(first.body.data.resumenPersonas).toEqual({
+      tipo: 'alumnos',
+      items: [{
+        matricula: 30500,
+        nombre: 'Julieta',
+        apellido: 'Acosta',
+        resultadosOficiales: expect.objectContaining({
+          resultadosConsiderados: 3,
+          porcentajeAprobacion: 66.67,
+          promedioNotaBase10: 7.5,
+        }),
+      }],
+      paginacion: { pagina: 1, limite: 1, total: 2, totalPaginas: 2 },
+    });
+    expect(second.body.data.resumenPersonas).toEqual({
+      tipo: 'alumnos',
+      items: [{
+        matricula: 30501,
+        nombre: 'Pedro',
+        apellido: 'Gomez',
+        resultadosOficiales: expect.objectContaining({
+          resultadosConsiderados: 0,
+          porcentajeAprobacion: null,
+          promedioNotaBase10: null,
+        }),
+      }],
+      paginacion: { pagina: 2, limite: 1, total: 2, totalPaginas: 2 },
+    });
+    expect(first.body.data.kpis).toEqual(second.body.data.kpis);
+    expect(first.body.data.paginacion).toEqual(second.body.data.paginacion);
+    expect(reqBuilder.input).toHaveBeenCalledWith('PersonOffset', 'INT', 0);
+    expect(reqBuilder.input).toHaveBeenCalledWith('PersonOffset', 'INT', 1);
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('FROM Alumno AL');
+    expect(sqlText).toContain('LEFT JOIN #IntentosValidosOficiales O ON O.IdAlumno=AL.Matricula');
+    expect(sqlText).toContain('IMB.IdMateriaDivision');
+    expect(sqlText.indexOf('INTO #ResumenPersonas')).toBeLessThan(
+      sqlText.indexOf('OFFSET @PersonOffset'),
+    );
+    expect(sqlText).toContain('ORDER BY Apellido ASC,Nombre ASC,Matricula ASC');
+  });
+
+  it('agrega resultados oficiales por docente actual y conserva docentes sin resultados', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      people: {
+        rows: [{ Legajo: 109000, Nombre: 'Florencia', Apellido: 'Balmaceda' }],
+        total: 1,
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?resumenPersonas=docentes')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenPersonas).toMatchObject({
+      tipo: 'docentes',
+      items: [{
+        legajo: 109000,
+        nombre: 'Florencia',
+        apellido: 'Balmaceda',
+        resultadosOficiales: {
+          resultadosConsiderados: 0,
+          porcentajeAprobacion: null,
+          promedioNotaBase10: null,
+        },
+      }],
+      paginacion: { pagina: 1, limite: 20, total: 1, totalPaginas: 1 },
+    });
+    const sqlText = (reqBuilder.query as jest.Mock).mock.calls[0][0];
+    expect(sqlText).toContain('FROM Docente DP');
+    expect(sqlText).toContain('PAR.IdDocente=DP.Legajo');
+    expect(sqlText).toContain('ORDER BY Apellido ASC,Nombre ASC,Legajo ASC');
+  });
+
+  it('agrega personas sin desplazar ni reinterpretar el resumen institucional', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets({
+      institutional: institucional,
+      people: {
+        rows: [{ Matricula: 30501, Nombre: 'Pedro', Apellido: 'Gomez' }],
+        total: 1,
+      },
+    }));
+
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?incluirResumenInstitucional=true&resumenPersonas=alumnos')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.resumenInstitucional.global.resultadosOficiales).toMatchObject({
+      resultadosConsiderados: 24,
+      porcentajeAprobacion: 75,
+      promedioNotaBase10: 7,
+    });
+    expect(res.body.data.resumenInstitucional.carreras).toHaveLength(2);
+    expect(res.body.data.resumenPersonas.items[0]).toMatchObject({
+      matricula: 30501,
+      resultadosOficiales: {
+        resultadosConsiderados: 0,
+        porcentajeAprobacion: null,
+        promedioNotaBase10: null,
+      },
+    });
+  });
+
+  it('mantiene exactamente la respuesta previa cuando resumenPersonas se omite', async () => {
+    const reqBuilder = mock.pool.request();
+    (reqBuilder.query as jest.Mock)
+      .mockResolvedValueOnce(reportRecordsets())
+      .mockResolvedValueOnce(reportRecordsets());
+
+    const baseline = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const repeated = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(repeated.body).toEqual(baseline.body);
+    expect(baseline.body.data).not.toHaveProperty('resumenPersonas');
+    expect((reqBuilder.query as jest.Mock).mock.calls[0][0]).not.toContain('#ResumenPersonas');
+  });
+
+  it.each(['resumenPersonas=alumnos', 'resumenPersonas=docentes'])(
+    'rechaza el resumen de personas para docente: %s',
+    async query => {
+      const reqBuilder = mock.pool.request();
+      const res = await request(app)
+        .get(`/api/reportes/rendimiento-evaluaciones?${query}`)
+        .set('Authorization', `Bearer ${docenteToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('REPORT_SCOPE_FORBIDDEN');
+      expect(reqBuilder.query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rechaza el resumen de personas para alumno mediante el RBAC vigente', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?resumenPersonas=alumnos')
+      .set('Authorization', `Bearer ${alumnoToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('exige resumenPersonas cuando se envía su paginación', async () => {
+    const res = await request(app)
+      .get('/api/reportes/rendimiento-evaluaciones?paginaPersonas=2')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REPORT_PERSON_OPTIONS_REQUIRE_SUMMARY');
+  });
+
   it('resuelve el intento válido antes de evaluar confirmación y conserva el gráfico legacy', async () => {
     const reqBuilder = mock.pool.request();
     (reqBuilder.query as jest.Mock).mockResolvedValueOnce(reportRecordsets());
@@ -1527,6 +1808,14 @@ describe('GET /api/reportes/rendimiento-evaluaciones', () => {
     'idMateriaDivision=abc',
     'idActividad=1.5',
     'idPublicacion=-2',
+    'matriculaAlumno=0',
+    'matriculaAlumno=abc',
+    'legajoDocente=0',
+    'legajoDocente=1.5',
+    'resumenPersonas=personas',
+    'paginaPersonas=0',
+    'limitePersonas=0',
+    'limitePersonas=101',
     'estado=inexistente',
     'pagina=0',
     'pagina=1.5',

@@ -6,6 +6,7 @@ const dbConfig = {
   server: process.env.DB_SERVER || "localhost",
   port: parseInt(process.env.DB_PORT || "1433"),
   database: process.env.DB_NAME,
+  requestTimeout: 30_000,
   options: {
     encrypt: false,
     trustServerCertificate: true

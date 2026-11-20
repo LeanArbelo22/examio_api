@@ -17,6 +17,8 @@ const bindFilters = (request: sql.Request, filters: RendimientoEvaluacionesQuery
   if (filters.idMateriaDivision) request.input('IdMateriaDivision', sql.Int, filters.idMateriaDivision);
   if (filters.idActividad) request.input('IdActividad', sql.Int, filters.idActividad);
   if (filters.idPublicacion) request.input('IdPublicacion', sql.Int, filters.idPublicacion);
+  if (filters.matriculaAlumno) request.input('MatriculaAlumno', sql.Int, filters.matriculaAlumno);
+  if (filters.legajoDocente) request.input('LegajoDocente', sql.Int, filters.legajoDocente);
   if (filters.estado) request.input('Estado', sql.NVarChar, filters.estado);
   if (filters.fechaDesde) request.input('FechaDesde', sql.DateTime2, new Date(filters.fechaDesde));
   if (filters.fechaHasta) request.input('FechaHasta', sql.DateTime2, new Date(filters.fechaHasta));
@@ -500,11 +502,75 @@ export const getRendimientoEvaluacionesReport = async (
     .input('Offset', sql.Int, (filters.pagina - 1) * filters.limite)
     .input('Limit', sql.Int, filters.limite);
   if (idDocente !== null) request.input('IdDocente', sql.Int, idDocente);
+  if (filters.resumenPersonas !== undefined) {
+    const personPage = filters.paginaPersonas ?? 1;
+    const personLimit = filters.limitePersonas ?? 20;
+    request.input('PersonOffset', sql.Int, (personPage - 1) * personLimit)
+      .input('PersonLimit', sql.Int, personLimit);
+  }
 
   const scopeClause = idDocente !== null ? 'AND MD.IdDocente = @IdDocente' : '';
+  const teacherFilterClause = filters.legajoDocente
+    ? 'AND MD.IdDocente = @LegajoDocente'
+    : '';
+  const studentPublicationClause = filters.matriculaAlumno ? `AND EXISTS (
+    SELECT 1 FROM Intento IFiltro
+    WHERE IFiltro.IdPublicacion=P.Id AND IFiltro.IdAlumno=@MatriculaAlumno
+  )` : '';
+  const studentEnrollmentClause = filters.matriculaAlumno
+    ? 'AND IM.IdAlumno=@MatriculaAlumno'
+    : '';
+  const studentAttemptClause = filters.matriculaAlumno
+    ? 'AND I.IdAlumno=@MatriculaAlumno'
+    : '';
   const stateClause = filters.estado ? 'AND A.Estado = @Estado' : '';
   const dateFromClause = filters.fechaDesde ? 'AND P.FechaInicio >= @FechaDesde' : '';
   const dateToClause = filters.fechaHasta ? 'AND P.FechaInicio <= @FechaHasta' : '';
+  const personPublicationScope = filters.idActividad || filters.idPublicacion ? `
+    AND EXISTS (
+      SELECT 1
+      FROM Publicacion PB
+      INNER JOIN Actividad AB ON AB.Id=PB.IdActividad AND AB.Tipo='evaluacion'
+      WHERE PB.IdMateriaDivision=MDB.Id
+        ${filters.idActividad ? 'AND AB.Id=@IdActividad' : ''}
+        ${filters.idPublicacion ? 'AND PB.Id=@IdPublicacion' : ''}
+    )` : '';
+  const studentNeedsAcademicScope = Boolean(
+    filters.idCarrera || filters.idMateria || filters.idMateriaDivision ||
+    filters.idActividad || filters.idPublicacion || filters.legajoDocente,
+  );
+  const studentPersonScope = studentNeedsAcademicScope ? `
+    AND EXISTS (
+      SELECT 1
+      FROM InscripcionMateria IMB
+      INNER JOIN MateriaDivision MDB ON MDB.Id=IMB.IdMateriaDivision
+      INNER JOIN Materia MB ON MB.Id=MDB.IdMateria
+      WHERE IMB.IdAlumno=AL.Matricula
+        ${filters.idCarrera ? 'AND MB.IdCarrera=@IdCarrera' : ''}
+        ${filters.idMateria ? 'AND MB.Id=@IdMateria' : ''}
+        ${filters.idMateriaDivision ? 'AND MDB.Id=@IdMateriaDivision' : ''}
+        ${filters.legajoDocente ? 'AND MDB.IdDocente=@LegajoDocente' : ''}
+        ${personPublicationScope}
+    )` : '';
+  const teacherNeedsAcademicScope = Boolean(
+    filters.idCarrera || filters.idMateria || filters.idMateriaDivision ||
+    filters.idActividad || filters.idPublicacion || filters.matriculaAlumno,
+  );
+  const teacherPersonScope = teacherNeedsAcademicScope ? `
+    AND EXISTS (
+      SELECT 1
+      FROM MateriaDivision MDB
+      INNER JOIN Materia MB ON MB.Id=MDB.IdMateria
+      WHERE MDB.IdDocente=DP.Legajo
+        ${filters.idCarrera ? 'AND MB.IdCarrera=@IdCarrera' : ''}
+        ${filters.idMateria ? 'AND MB.Id=@IdMateria' : ''}
+        ${filters.idMateriaDivision ? 'AND MDB.Id=@IdMateriaDivision' : ''}
+        ${filters.matriculaAlumno ? `AND EXISTS (
+          SELECT 1 FROM InscripcionMateria IMB
+          WHERE IMB.IdMateriaDivision=MDB.Id AND IMB.IdAlumno=@MatriculaAlumno
+        )` : ''}
+        ${personPublicationScope}
+    )` : '';
   const orderBy = orderingMap[filters.ordenarPor];
   const direction = filters.ordenDireccion === 'asc' ? 'ASC' : 'DESC';
   const validSelectionJoins = filters.alcanceIntentos === 'validos' ? `
@@ -667,7 +733,7 @@ export const getRendimientoEvaluacionesReport = async (
     ORDER BY Carrera,Materia,IdMateria;
 
     SELECT
-      IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division,
+      IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division,IdDocente,Docente,
       COUNT(*) AS Publicaciones,
       COALESCE(SUM(CASE WHEN OficialResultadosPendientes>0 THEN 1 ELSE 0 END),0)
         AS PublicacionesConResultadosPendientes,
@@ -695,10 +761,76 @@ export const getRendimientoEvaluacionesReport = async (
         AS OperativoIntentosConPreguntasSinPuntaje,
       COALESCE(SUM(OperativoPreguntasSinPuntaje),0) AS OperativoPreguntasSinPuntaje
     FROM #ReporteEvaluaciones
-    GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division
+    GROUP BY IdCarrera,Carrera,IdMateria,Materia,IdMateriaDivision,Division,IdDocente,Docente
     ORDER BY Carrera,Materia,IdMateria,Division,IdMateriaDivision;
 
     ${monthlyInstitutionalSql}
+  ` : '';
+
+  const officialPersonColumns = `
+      COUNT(O.IdIntento) AS OficialIntentosValidosEntregados,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        THEN 1 ELSE 0 END),0) AS OficialResultadosConsiderados,
+      COALESCE(SUM(CASE WHEN O.IdIntento IS NOT NULL
+        AND (O.CorreccionConfirmada=0 OR O.NotaFinal IS NULL) THEN 1 ELSE 0 END),0)
+        AS OficialResultadosPendientes,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=0 THEN 1 ELSE 0 END),0)
+        AS OficialIntentosPendientesConfirmacion,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NULL
+        THEN 1 ELSE 0 END),0) AS OficialIntentosConfirmadosSinNota,
+      COALESCE(SUM(CASE WHEN O.PreguntasSinPuntaje>0 THEN 1 ELSE 0 END),0)
+        AS OficialIntentosConPreguntasSinPuntaje,
+      COALESCE(SUM(O.PreguntasSinPuntaje),0) AS OficialPreguntasSinPuntaje,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.NotaFinal>=O.NotaAprobacion THEN 1 ELSE 0 END),0) AS OficialAprobados,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.NotaFinal<O.NotaAprobacion THEN 1 ELSE 0 END),0) AS OficialDesaprobados,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.EscalaCalificacion IN (10,100)
+        THEN CONVERT(BIGINT,O.NotaFinal*10000/O.EscalaCalificacion) ELSE 0 END),0)
+        AS OficialSumaNotaBase10Milesimas,
+      COALESCE(SUM(CASE WHEN O.CorreccionConfirmada=1 AND O.NotaFinal IS NOT NULL
+        AND O.EscalaCalificacion IN (10,100) THEN 1 ELSE 0 END),0)
+        AS OficialCantidadNotasBase10`;
+  const personSummarySql = filters.resumenPersonas === 'alumnos' ? `
+    SELECT
+      AL.Matricula,
+      AL.Nombre,
+      AL.Apellido,
+      ${officialPersonColumns}
+    INTO #ResumenPersonas
+    FROM Alumno AL
+    LEFT JOIN #IntentosValidosOficiales O ON O.IdAlumno=AL.Matricula
+    WHERE 1=1
+      ${filters.matriculaAlumno ? 'AND AL.Matricula=@MatriculaAlumno' : ''}
+      ${studentPersonScope}
+    GROUP BY AL.Matricula,AL.Nombre,AL.Apellido;
+
+    SELECT * FROM #ResumenPersonas
+    ORDER BY Apellido ASC,Nombre ASC,Matricula ASC
+    OFFSET @PersonOffset ROWS FETCH NEXT @PersonLimit ROWS ONLY;
+
+    SELECT COUNT(*) AS Total FROM #ResumenPersonas;
+  ` : filters.resumenPersonas === 'docentes' ? `
+    SELECT
+      DP.Legajo,
+      DP.Nombre,
+      DP.Apellido,
+      ${officialPersonColumns}
+    INTO #ResumenPersonas
+    FROM Docente DP
+    LEFT JOIN #PublicacionesAlcanzadas PAR ON PAR.IdDocente=DP.Legajo
+    LEFT JOIN #IntentosValidosOficiales O ON O.IdPublicacion=PAR.IdPublicacion
+    WHERE 1=1
+      ${filters.legajoDocente ? 'AND DP.Legajo=@LegajoDocente' : ''}
+      ${teacherPersonScope}
+    GROUP BY DP.Legajo,DP.Nombre,DP.Apellido;
+
+    SELECT * FROM #ResumenPersonas
+    ORDER BY Apellido ASC,Nombre ASC,Legajo ASC
+    OFFSET @PersonOffset ROWS FETCH NEXT @PersonLimit ROWS ONLY;
+
+    SELECT COUNT(*) AS Total FROM #ResumenPersonas;
   ` : '';
 
   const result = await request.query(`
@@ -714,6 +846,10 @@ export const getRendimientoEvaluacionesReport = async (
       C.Nombre AS Carrera,
       MD.Id AS IdMateriaDivision,
       D.Descripcion AS Division,
+      MD.IdDocente,
+      CASE WHEN DOC.Legajo IS NULL THEN NULL
+        ELSE CONCAT(DOC.Nombre,' ',DOC.Apellido)
+      END AS Docente,
       P.FechaInicio,
       P.FechaFin,
       A.Estado,
@@ -726,8 +862,11 @@ export const getRendimientoEvaluacionesReport = async (
     INNER JOIN Materia M ON M.Id = MD.IdMateria
     INNER JOIN Carrera C ON C.Id = M.IdCarrera
     INNER JOIN Division D ON D.Id = MD.IdDivision
+    LEFT JOIN Docente DOC ON DOC.Legajo = MD.IdDocente
     WHERE A.Tipo = 'evaluacion'
       ${scopeClause}
+      ${teacherFilterClause}
+      ${studentPublicationClause}
       ${identifierWhere(filters)}
       ${stateClause}
       ${dateFromClause}
@@ -739,6 +878,7 @@ export const getRendimientoEvaluacionesReport = async (
     INTO #Padrones
     FROM #PublicacionesAlcanzadas PA
     LEFT JOIN InscripcionMateria IM ON IM.IdMateriaDivision = PA.IdMateriaDivision
+      ${studentEnrollmentClause}
     GROUP BY PA.IdPublicacion;
 
     SELECT I.Id AS IdIntento,
@@ -748,7 +888,7 @@ export const getRendimientoEvaluacionesReport = async (
     FROM Intento I
     LEFT JOIN IntentoPregunta IP ON IP.IdIntento=I.Id
     JOIN #PublicacionesAlcanzadas PA ON PA.IdPublicacion=I.IdPublicacion
-    WHERE I.Estado='entregado'
+    WHERE I.Estado='entregado' ${studentAttemptClause}
     GROUP BY I.Id;
 
     SELECT X.IdPublicacion,X.IdAlumno,IV.Id AS IdIntento,IV.CorreccionConfirmada,
@@ -759,6 +899,7 @@ export const getRendimientoEvaluacionesReport = async (
       SELECT DISTINCT I.IdPublicacion,I.IdAlumno
       FROM Intento I
       JOIN #PublicacionesAlcanzadas PA0 ON PA0.IdPublicacion=I.IdPublicacion
+      WHERE 1=1 ${studentAttemptClause}
     ) X
     JOIN #PublicacionesAlcanzadas PA ON PA.IdPublicacion=X.IdPublicacion
     LEFT JOIN IntentoValidoOverride IVO
@@ -829,7 +970,7 @@ export const getRendimientoEvaluacionesReport = async (
         AS OperativoPreguntasSinPuntaje
     INTO #PendientesOperativos
     FROM #PublicacionesAlcanzadas PA
-    LEFT JOIN Intento I ON I.IdPublicacion=PA.IdPublicacion
+    LEFT JOIN Intento I ON I.IdPublicacion=PA.IdPublicacion ${studentAttemptClause}
     LEFT JOIN #PreguntasPendientesIntento PPI ON PPI.IdIntento=I.Id
     GROUP BY PA.IdPublicacion;
 
@@ -848,7 +989,8 @@ export const getRendimientoEvaluacionesReport = async (
       WHERE R.IdIncidente=E.Id
       ORDER BY R.Revision DESC
     ) RI
-    WHERE 1=1 ${incidentTypeClause} ${incidentSeverityClause} ${unreviewedClause};
+    WHERE 1=1 ${studentAttemptClause}
+      ${incidentTypeClause} ${incidentSeverityClause} ${unreviewedClause};
 
     SELECT IdPublicacion,COUNT_BIG(*) AS TotalIncidentes,
       COUNT(DISTINCT IdAlumno) AS AlumnosConIncidentes,
@@ -877,7 +1019,7 @@ export const getRendimientoEvaluacionesReport = async (
         AS SumaNotasNormalizadasBase10
     INTO #Intentos
     FROM #PublicacionesAlcanzadas PA
-    LEFT JOIN Intento I ON I.IdPublicacion = PA.IdPublicacion
+    LEFT JOIN Intento I ON I.IdPublicacion = PA.IdPublicacion ${studentAttemptClause}
     ${validSelectionJoins}
     GROUP BY PA.IdPublicacion;
 
@@ -952,6 +1094,7 @@ export const getRendimientoEvaluacionesReport = async (
         SELECT COUNT(DISTINCT IM.IdAlumno)
         FROM #ReporteEvaluaciones RE
         INNER JOIN InscripcionMateria IM ON IM.IdMateriaDivision = RE.IdMateriaDivision
+          ${studentEnrollmentClause}
       ) AS TotalAlumnosUnicos,
       COALESCE(SUM(IntentosTotales), 0) AS TotalIntentos,
       COALESCE(SUM(Entregados), 0) AS TotalEntregados,
@@ -1024,6 +1167,8 @@ export const getRendimientoEvaluacionesReport = async (
       Carrera,
       IdMateriaDivision,
       Division,
+      IdDocente,
+      Docente,
       FechaInicio,
       FechaFin,
       Estado,
@@ -1073,6 +1218,8 @@ export const getRendimientoEvaluacionesReport = async (
     OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY;
 
     SELECT COUNT(*) AS Total FROM #ReporteEvaluaciones;
+
+    ${personSummarySql}
   `).catch((error: unknown) => {
     const sqlError = error as { number?: number; message?: string };
     if (sqlError.number === 51050 || sqlError.message?.includes('REPORT_INVALID_GRADING_SCALE')) {
@@ -1161,6 +1308,39 @@ export const getRendimientoEvaluacionesReport = async (
   const evaluationRows = recordsets[evaluationIndex] || [];
   const totalRows = recordsets[evaluationIndex + 1] || [];
   const total = Number(totalRows[0]?.Total || 0);
+  let resumenPersonas: Record<string, unknown> | undefined;
+  if (filters.resumenPersonas !== undefined) {
+    const personRows = mapKeysToCamelCase(recordsets[evaluationIndex + 2] || []) as
+      Array<Record<string, unknown>>;
+    const personTotalRows = recordsets[evaluationIndex + 3] || [];
+    const personPage = filters.paginaPersonas ?? 1;
+    const personLimit = filters.limitePersonas ?? 20;
+    const items = personRows.map(person => {
+      const official = extraerBloquesDocentes(person).resultadosOficiales;
+      return filters.resumenPersonas === 'alumnos' ? {
+        matricula: numberValue(person.matricula),
+        nombre: String(person.nombre ?? ''),
+        apellido: String(person.apellido ?? ''),
+        resultadosOficiales: official,
+      } : {
+        legajo: numberValue(person.legajo),
+        nombre: String(person.nombre ?? ''),
+        apellido: String(person.apellido ?? ''),
+        resultadosOficiales: official,
+      };
+    });
+    const personTotal = Number(personTotalRows[0]?.Total || 0);
+    resumenPersonas = {
+      tipo: filters.resumenPersonas,
+      items,
+      paginacion: {
+        pagina: personPage,
+        limite: personLimit,
+        total: personTotal,
+        totalPaginas: personTotal === 0 ? 0 : Math.ceil(personTotal / personLimit),
+      },
+    };
+  }
   const kpis = extraerBloquesDocentes(
     mapKeysToCamelCase(kpiRows[0] || {}) as Record<string, unknown>,
   );
@@ -1178,6 +1358,17 @@ export const getRendimientoEvaluacionesReport = async (
       severidad: filters.severidad ?? null,
       soloIncidentesSinRevisar: filters.soloIncidentesSinRevisar ?? null,
       ...(filters.idCarrera !== undefined ? { idCarrera: filters.idCarrera } : {}),
+      ...(filters.matriculaAlumno !== undefined
+        ? { matriculaAlumno: filters.matriculaAlumno }
+        : {}),
+      ...(filters.legajoDocente !== undefined
+        ? { legajoDocente: filters.legajoDocente }
+        : {}),
+      ...(filters.resumenPersonas !== undefined ? {
+        resumenPersonas: filters.resumenPersonas,
+        paginaPersonas: filters.paginaPersonas ?? 1,
+        limitePersonas: filters.limitePersonas ?? 20,
+      } : {}),
       ...(filters.incluirResumenInstitucional !== undefined
         ? { incluirResumenInstitucional: filters.incluirResumenInstitucional }
         : {}),
@@ -1199,6 +1390,7 @@ export const getRendimientoEvaluacionesReport = async (
     graficos: { distribucionResultados },
     evaluaciones,
     ...(resumenInstitucional ? { resumenInstitucional } : {}),
+    ...(resumenPersonas ? { resumenPersonas } : {}),
     paginacion: {
       pagina: filters.pagina,
       limite: filters.limite,

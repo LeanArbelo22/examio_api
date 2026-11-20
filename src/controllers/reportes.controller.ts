@@ -238,6 +238,25 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
   try {
     const user = (req as any).user;
     const requestNow = new Date();
+    const hasPersonOptions = parsed.data.resumenPersonas !== undefined ||
+      parsed.data.paginaPersonas !== undefined || parsed.data.limitePersonas !== undefined;
+    if ((parsed.data.matriculaAlumno !== undefined || parsed.data.legajoDocente !== undefined ||
+        hasPersonOptions) &&
+        user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Los filtros por alumno o docente requieren rol administrador',
+        code: 'REPORT_SCOPE_FORBIDDEN',
+      });
+    }
+    if (parsed.data.resumenPersonas === undefined &&
+        (parsed.data.paginaPersonas !== undefined || parsed.data.limitePersonas !== undefined)) {
+      return seriesError(
+        res,
+        'REPORT_PERSON_OPTIONS_REQUIRE_SUMMARY',
+        'La paginación de personas requiere resumenPersonas',
+      );
+    }
     const hasInstitutionalOptions = parsed.data.incluirSerieMensual === true ||
       parsed.data.agrupacionSerie !== undefined ||
       parsed.data.ordenRanking !== undefined ||
@@ -296,7 +315,8 @@ export const getRendimientoEvaluaciones = async (req: Request, res: Response) =>
       effectiveFilters = { ...parsed.data, fechaHasta: effectiveTo.toISOString() };
     }
 
-    if (effectiveFilters.incluirResumenInstitucional === true) {
+    if (effectiveFilters.incluirResumenInstitucional === true ||
+        effectiveFilters.resumenPersonas !== undefined) {
       const consistent = await areEvaluationReportFiltersConsistent(effectiveFilters);
       if (!consistent) {
         return seriesError(

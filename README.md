@@ -714,6 +714,35 @@ frontend puede agrupar por IDs sin depender de nombres potencialmente repetidos.
 | GET | `/api/comisiones` | — | Público |
 | GET | `/api/comisiones/:id/alumnos` | — | Público |
 
+`GET /api/comisiones` lista todas las relaciones `MateriaDivision`, aunque no tengan
+publicaciones o docente asignado. Conserva los campos históricos y agrega los IDs
+estables `idMateria` e `idDocente`; este último representa el legajo asignado
+actualmente y puede ser `null`.
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "idMateriaDivision": 17,
+      "idMateria": 8,
+      "materia": "Fundamentos de Redes",
+      "division": "1NMS",
+      "idDocente": 109000,
+      "docenteAsignado": "Florencia Balmaceda"
+    },
+    {
+      "idMateriaDivision": 18,
+      "idMateria": 8,
+      "materia": "Fundamentos de Redes",
+      "division": "1TMS",
+      "idDocente": null,
+      "docenteAsignado": "No asignado"
+    }
+  ]
+}
+```
+
 ### 4.7 Divisiones
 
 | Método | Endpoint | Zod | Roles |
@@ -1933,6 +1962,11 @@ parámetros desconocidos también producen `400 REQUEST_INVALID`.
 | `idMateriaDivision` | entero positivo | Comisión exacta |
 | `idActividad` | entero positivo | Actividad base |
 | `idPublicacion` | entero positivo | Publicación exacta |
+| `matriculaAlumno` | entero positivo | Sólo admin; limita publicaciones, intentos, resultados, pendientes e incidentes al alumno |
+| `legajoDocente` | entero positivo | Sólo admin; filtra por la asignación actual de `MateriaDivision.IdDocente` |
+| `resumenPersonas` | `alumnos` \| `docentes` | Sólo admin; agrega el listado paginado de personas con resultados oficiales |
+| `paginaPersonas` | entero, default `1` | Página independiente del listado de personas; requiere `resumenPersonas` |
+| `limitePersonas` | entero, default `20` | Entre 1 y 100; requiere `resumenPersonas` |
 | `estado` | enum | `borrador`, `publicada` o `archivada`; corresponde a `Actividad.Estado` |
 | `fechaDesde` | ISO 8601 | `Publicacion.FechaInicio >= fechaDesde` |
 | `fechaHasta` | ISO 8601 | `Publicacion.FechaInicio <= fechaHasta` |
@@ -1960,6 +1994,13 @@ ser `YYYY-MM-DD` o timestamps ISO 8601; `fechaDesde` no puede superar
 #### RBAC y alcance
 
 - `admin` consulta todas las publicaciones institucionales alcanzadas por los filtros.
+- `matriculaAlumno` y `legajoDocente` son filtros exclusivos de `admin`; un docente
+  recibe `403 REPORT_SCOPE_FORBIDDEN` y un alumno conserva el `403 FORBIDDEN` del RBAC.
+- `matriculaAlumno` conserva únicamente publicaciones con intentos del alumno y aplica
+  la matrícula antes de calcular padrón, intentos, selección válida, resultados oficiales,
+  pendientes e incidentes. Nunca devuelve resultados del resto de la comisión.
+- `legajoDocente` usa la asignación actual de `MateriaDivision.IdDocente`; no reconstruye
+  asignaciones históricas.
 - `docente` usa exclusivamente `idDocente` del access token y sólo consulta
   `MateriaDivision.IdDocente = idDocente`.
 - No se acepta identidad docente desde query string.
@@ -2031,6 +2072,129 @@ identifican por `idMateria`, `idMateriaDivision` e `idCarrera`; `carrera` se obt
 de la relación `Materia -> Carrera`. Los porcentajes se calculan desde numeradores y
 denominadores agregados y son `null` sin denominador. El resumen usa todo el conjunto
 filtrado antes de paginar y conserva `Publicacion.FechaInicio` como dimensión temporal.
+Cada comisión y cada fila de evaluación exponen además `idDocente` y `docente` desde
+la asignación actual de `MateriaDivision`; ambos son `null` cuando no existe docente
+asignado. Estos campos no representan un historial de asignaciones docentes.
+La jerarquía institucional se construye desde las publicaciones alcanzadas: carreras,
+materias o comisiones sin publicaciones no aparecen en este reporte.
+
+Ejemplos administrativos:
+
+```http
+GET /api/reportes/rendimiento-evaluaciones?matriculaAlumno=30500&incluirResumenInstitucional=true
+GET /api/reportes/rendimiento-evaluaciones?legajoDocente=109000&incluirResumenInstitucional=true
+```
+
+Los dos filtros pueden combinarse. La respuesta mantiene el contrato existente y refleja
+los filtros efectivos en `data.criterios`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "criterios": {
+      "alcanceIntentos": "todos",
+      "escalaPromedio": 10,
+      "matriculaAlumno": 30500,
+      "legajoDocente": 109000,
+      "incluirResumenInstitucional": true
+    },
+    "evaluaciones": [
+      {
+        "idPublicacion": 47,
+        "idMateriaDivision": 12,
+        "idDocente": 109000,
+        "docente": "Florencia Balmaceda",
+        "resultadosOficiales": {
+          "intentosValidosEntregados": 1,
+          "resultadosConsiderados": 1,
+          "resultadosPendientes": 0,
+          "intentosPendientesConfirmacion": 0,
+          "intentosConfirmadosSinNota": 0,
+          "intentosConPreguntasSinPuntaje": 0,
+          "preguntasSinPuntaje": 0,
+          "aprobados": 1,
+          "desaprobados": 0,
+          "porcentajeAprobacion": 100,
+          "porcentajeCoberturaConfirmada": 100,
+          "promedioNotaBase10": 8
+        }
+      }
+    ]
+  }
+}
+```
+
+`resumenPersonas=alumnos|docentes` agrega un bloque independiente sin reemplazar KPIs,
+jerarquía, comparativas, series, evaluaciones ni su paginación. La consulta calcula los
+resultados oficiales de todo el conjunto filtrado antes de paginar personas y usa orden
+estable por `apellido`, `nombre` e identificador (`matricula` o `legajo`).
+
+- Alumnos se identifican una sola vez por `Alumno.Matricula`. Con filtros académicos se
+  incluyen mediante su inscripción actual en `InscripcionMateria`.
+- Docentes se identifican una sola vez por `Docente.Legajo`. Sus resultados describen las
+  publicaciones de sus asignaciones actuales en `MateriaDivision`; no califican al docente.
+- El período y el estado de actividad limitan los resultados, no eliminan personas de la
+  relación académica seleccionada. Sin resultados, `resultadosConsiderados` es `0` y los
+  campos `porcentajeAprobacion` y `promedioNotaBase10` son `null`.
+- Sin filtros académicos se incluyen todas las personas, aunque no tengan inscripciones,
+  asignaciones, publicaciones o resultados.
+- `paginaPersonas` o `limitePersonas` sin `resumenPersonas` devuelve
+  `400 REPORT_PERSON_OPTIONS_REQUIRE_SUMMARY`.
+
+```json
+{
+  "resumenPersonas": {
+    "tipo": "alumnos",
+    "items": [
+      {
+        "matricula": 30500,
+        "nombre": "Julieta",
+        "apellido": "Acosta",
+        "resultadosOficiales": {
+          "intentosValidosEntregados": 4,
+          "resultadosConsiderados": 3,
+          "resultadosPendientes": 1,
+          "intentosPendientesConfirmacion": 1,
+          "intentosConfirmadosSinNota": 0,
+          "intentosConPreguntasSinPuntaje": 0,
+          "preguntasSinPuntaje": 0,
+          "aprobados": 2,
+          "desaprobados": 1,
+          "porcentajeAprobacion": 66.67,
+          "porcentajeCoberturaConfirmada": 75,
+          "promedioNotaBase10": 7.5
+        }
+      },
+      {
+        "matricula": 30501,
+        "nombre": "Pedro",
+        "apellido": "Gómez",
+        "resultadosOficiales": {
+          "intentosValidosEntregados": 0,
+          "resultadosConsiderados": 0,
+          "resultadosPendientes": 0,
+          "intentosPendientesConfirmacion": 0,
+          "intentosConfirmadosSinNota": 0,
+          "intentosConPreguntasSinPuntaje": 0,
+          "preguntasSinPuntaje": 0,
+          "aprobados": 0,
+          "desaprobados": 0,
+          "porcentajeAprobacion": null,
+          "porcentajeCoberturaConfirmada": null,
+          "promedioNotaBase10": null
+        }
+      }
+    ],
+    "paginacion": {
+      "pagina": 1,
+      "limite": 20,
+      "total": 240,
+      "totalPaginas": 12
+    }
+  }
+}
+```
 
 `comparativas` devuelve carreras, materias y comisiones completas, separadas en
 `elegibles`, `evidenciaLimitada` y `sinResultados`. El criterio configurable inicial
@@ -2111,6 +2275,8 @@ promedio parcial. No modifica los promedios legacy. Contrato completo:
         "materia": "Bases de Datos",
         "idMateriaDivision": 12,
         "division": "2A",
+        "idDocente": 109000,
+        "docente": "Florencia Balmaceda",
         "fechaInicio": "2026-08-01T12:00:00.000Z",
         "fechaFin": "2026-08-01T14:00:00.000Z",
         "estado": "publicada",

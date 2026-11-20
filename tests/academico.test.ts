@@ -351,6 +351,59 @@ describe('Materias', () => {
   });
 });
 
+describe('Comisiones', () => {
+  describe('GET /api/comisiones', () => {
+    it('conserva los campos actuales y agrega IDs estables incluso sin docente ni publicaciones', async () => {
+      (mock.pool.query as jest.Mock).mockResolvedValueOnce({
+        recordset: [{
+          IdMateriaDivision: 17,
+          IdMateria: 8,
+          Materia: 'Fundamentos de Redes',
+          Division: '1NMS',
+          IdDocente: 109000,
+          DocenteAsignado: 'Florencia Balmaceda',
+        }, {
+          IdMateriaDivision: 18,
+          IdMateria: 8,
+          Materia: 'Fundamentos de Redes',
+          Division: '1TMS',
+          IdDocente: null,
+          DocenteAsignado: 'No asignado',
+        }],
+      });
+
+      const res = await request(app).get('/api/comisiones');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        data: [{
+          idMateriaDivision: 17,
+          idMateria: 8,
+          materia: 'Fundamentos de Redes',
+          division: '1NMS',
+          idDocente: 109000,
+          docenteAsignado: 'Florencia Balmaceda',
+        }, {
+          idMateriaDivision: 18,
+          idMateria: 8,
+          materia: 'Fundamentos de Redes',
+          division: '1TMS',
+          idDocente: null,
+          docenteAsignado: 'No asignado',
+        }],
+      });
+
+      const sqlText = (mock.pool.query as jest.Mock).mock.calls[0][0];
+      expect(sqlText).toContain('MD.IdMateria');
+      expect(sqlText).toContain('MD.IdDocente');
+      expect(sqlText).toContain('FROM MateriaDivision AS MD');
+      expect(sqlText).toContain('LEFT JOIN Docente AS Doc');
+      expect(sqlText).not.toContain('Publicacion');
+    });
+  });
+});
+
 describe('Docentes', () => {
   describe('GET /api/docentes', () => {
     it('retorna 200 con array de docentes en camelCase (admin)', async () => {

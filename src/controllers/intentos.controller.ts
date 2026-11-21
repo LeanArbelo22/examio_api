@@ -51,48 +51,35 @@ export const iniciarExamen = async (req: Request, res: Response) => {
       throw new BancoError(403, 'No puede iniciar un intento para otro alumno', 'ATTEMPT_SCOPE_FORBIDDEN');
     }
 
-    // ── Candado de seguridad: verificar límite de intentos ──
-    const check = await pool.request()
-      .input('IdPublicacion', sql.Int, IdPublicacion)
-      .input('IdAlumno', sql.Int, IdAlumno)
-      .query(`
-        SELECT ISNULL(CNT.IntentosRealizados, 0) AS IntentosRealizados,
-               A.CantidadIntentosMaximos
-        FROM Publicacion P
-        INNER JOIN Actividad A ON P.IdActividad = A.Id
-        OUTER APPLY (
-            SELECT COUNT(*) AS IntentosRealizados
-            FROM Intento II
-            WHERE II.IdPublicacion = @IdPublicacion
-              AND II.IdAlumno = @IdAlumno
-        ) CNT
-        WHERE P.Id = @IdPublicacion
-      `);
-
-    const row = check.recordset[0];
-    if (row && Number(row.IntentosRealizados) >= Number(row.CantidadIntentosMaximos)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Acceso denegado: Has alcanzado el límite máximo de intentos permitidos para esta evaluación.',
-      });
-    }
-
+    // borro elcontandor de intentos porque ahora lo  hace el procedimiento almacenado.
     const result = await pool.request()
       .input('IdPublicacion', sql.Int, IdPublicacion)
       .input('IdAlumno', sql.Int, IdAlumno)
       .input('CamaraVerificada', sql.Bit, CamaraVerificada)
+      .input('IncluirConfiguracionCapturas', sql.Bit, true) // traemos la config
       .execute('SP_Intento_IniciarExamen');
 
     res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
   } catch (err: unknown) { 
-    if (typeof err === 'object' && err !== null && 'number' in err && err.number === 51351) {
+    const validarError = typeof err === 'object' && err !== null && 'number' in err ? err.number : undefined;
+    
+    if (validarError === 51351) {
       return responderErrorBanco(res, new BancoError(
         409,
         'Verificá la cámara antes de iniciar el examen.',
         'CAMARA_VERIFICACION_REQUERIDA',
       ));
     }
-    responderErrorBanco(res, err); }
+
+    if (validarError === 51352) {
+      return responderErrorBanco(res, new BancoError(
+        403,
+        'Acceso denegado: Has alcanzado el límite máximo de intentos permitidos para esta evaluación.',
+      ));
+    }
+
+    responderErrorBanco(res, err);
+  }
 };
 
 export const guardarRespuesta = async (req: Request, res: Response) => {

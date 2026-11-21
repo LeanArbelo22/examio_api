@@ -255,7 +255,7 @@ export async function obtenerEstadoSupervision(
   const result = await pool.request().input("IdIntento", sql.Int, idIntento)
     .query(`
     SELECT E.IdIntento,E.Estado AS EstadoSupervision,E.Revision AS RevisionEstado,
-      E.FechaActualizacion,S.PantallaCompletaObligatoria
+      E.FechaActualizacion,S.PantallaCompletaObligatoria,S.CapturasHabilitadas,S.IntervaloCapturasSegundos -- obtenemos la configuracion
     FROM dbo.EstadoSupervisionIntento E
     JOIN dbo.IntentoPoliticaSupervision S ON S.IdIntento=E.IdIntento
     WHERE E.IdIntento=@IdIntento;`);
@@ -266,7 +266,11 @@ export async function obtenerEstadoSupervision(
       "El intento no tiene snapshot de supervisión",
       "SUPERVISION_SNAPSHOT_MISSING",
     );
-  return respuestaEstado(row);
+  return {
+    ...respuestaEstado(row),
+    CapturasHabilitadas: Boolean(row.CapturasHabilitadas), // convierte el bit a booleano para manejar desde el front
+    IntervaloCapturasSegundos: row.IntervaloCapturasSegundos,
+  };
 }
 
 export async function obtenerDetalleSupervision(

@@ -9,6 +9,7 @@ const optionalPositiveInteger = z.preprocess(
 export const IniciarExamenSchema = z.object({
   IdPublicacion: z.number().int(),
   IdAlumno: z.number().int(),
+  CamaraVerificada: z.boolean().optional(),
 });
 
 export const GuardarRespuestaSchema = z.object({

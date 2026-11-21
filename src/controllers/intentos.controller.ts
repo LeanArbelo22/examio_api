@@ -45,7 +45,7 @@ const revisionDisponibleSql = `CAST(CASE
 
 export const iniciarExamen = async (req: Request, res: Response) => {
   try {
-    const { IdPublicacion, IdAlumno } = req.body;
+    const { IdPublicacion, IdAlumno, CamaraVerificada = false } = req.body;
     const actor = (req as Request & { user: ActorBanco }).user;
     if (actor.role === 'alumno' && actor.idAlumno !== IdAlumno) {
       throw new BancoError(403, 'No puede iniciar un intento para otro alumno', 'ATTEMPT_SCOPE_FORBIDDEN');
@@ -80,10 +80,19 @@ export const iniciarExamen = async (req: Request, res: Response) => {
     const result = await pool.request()
       .input('IdPublicacion', sql.Int, IdPublicacion)
       .input('IdAlumno', sql.Int, IdAlumno)
+      .input('CamaraVerificada', sql.Bit, CamaraVerificada)
       .execute('SP_Intento_IniciarExamen');
 
     res.json({ success: true, data: mapKeysToCamelCase(result.recordset) });
-  } catch (err: unknown) { responderErrorBanco(res, err); }
+  } catch (err: unknown) { 
+    if (typeof err === 'object' && err !== null && 'number' in err && err.number === 51351) {
+      return responderErrorBanco(res, new BancoError(
+        409,
+        'Verificá la cámara antes de iniciar el examen.',
+        'CAMARA_VERIFICACION_REQUERIDA',
+      ));
+    }
+    responderErrorBanco(res, err); }
 };
 
 export const guardarRespuesta = async (req: Request, res: Response) => {
